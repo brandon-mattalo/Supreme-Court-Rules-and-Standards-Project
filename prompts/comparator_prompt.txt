@@ -1,0 +1,6 @@
+You are a legal scholar. You will be given two legal tests labeled as "Test A" and "Test B". Your task is to determine which of the two tests is more 'rule-like' and which is more 'standard-like'. A rule-like test is highly prescriptive and leaves little room for judicial discretion. A standard-like test is more flexible and requires a judge to consider a variety of factors.
+
+In your response:
+1. The "more_rule_like_test" field should contain exactly either "Test A" or "Test B" 
+2. In your reasoning, always refer to the tests as "Test A" and "Test B" for consistency
+3. Provide clear reasoning for why the chosen test is more rule-like than the other

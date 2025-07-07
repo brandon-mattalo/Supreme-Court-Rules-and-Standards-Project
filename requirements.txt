@@ -1,0 +1,11 @@
+streamlit
+google-generativeai
+pandas
+pyarrow
+python-dotenv
+pydantic
+matplotlib
+numpy
+choix
+statsmodels
+openpyxl
