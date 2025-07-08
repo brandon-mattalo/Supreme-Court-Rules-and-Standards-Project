@@ -694,6 +694,136 @@ def run_comparison(test1, test2):
     )
     return response.text
 
+@st.cache_data(ttl=60)  # Cache for 1 minute
+def get_database_counts():
+    """Get database counts with caching"""
+    conn = get_database_connection()
+    try:
+        cases_count = int(pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0])
+        tests_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0])
+        comparisons_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0])
+        validated_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0])
+        return cases_count, tests_count, comparisons_count, validated_count
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_overview_tests():
+    """Get overview tests with detailed information for expansion"""
+    conn = get_database_connection()
+    try:
+        tests_df = pd.read_sql("""
+            SELECT lt.*, c.case_name, c.citation, c.decision_year, c.scc_url, c.area_of_law
+            FROM legal_tests lt 
+            JOIN cases c ON lt.case_id = c.case_id 
+            ORDER BY lt.test_id DESC
+        """, conn)
+        return tests_df
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes  
+def get_pending_tests():
+    """Get pending tests for validation with caching"""
+    conn = get_database_connection()
+    try:
+        pending_tests = pd.read_sql("""
+            SELECT lt.*, c.case_name, c.scc_url 
+            FROM legal_tests lt 
+            JOIN cases c ON lt.case_id = c.case_id 
+            WHERE lt.validation_status = 'pending'
+        """, conn)
+        return pending_tests
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_validated_tests():
+    """Get validated tests for comparisons with caching"""
+    conn = get_database_connection()
+    try:
+        validated_tests = pd.read_sql("""
+            SELECT lt.*, c.case_name, c.citation, c.scc_url 
+            FROM legal_tests lt 
+            JOIN cases c ON lt.case_id = c.case_id 
+            WHERE lt.validation_status = 'accurate'
+            ORDER BY c.decision_year DESC
+        """, conn)
+        return validated_tests
+    finally:
+        conn.close()
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def get_completed_comparisons():
+    """Get all completed comparisons with detailed information"""
+    conn = get_database_connection()
+    try:
+        completed_comparisons = pd.read_sql("""
+            SELECT 
+                ltc.*,
+                c1.case_name as case1_name, c1.citation as case1_citation, c1.decision_year as case1_year,
+                c2.case_name as case2_name, c2.citation as case2_citation, c2.decision_year as case2_year,
+                lt1.extracted_test_summary as test1_summary,
+                lt2.extracted_test_summary as test2_summary,
+                winner_c.case_name as winner_name,
+                winner_lt.extracted_test_summary as winner_summary
+            FROM legal_test_comparisons ltc
+            JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
+            JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
+            JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
+            JOIN cases c1 ON lt1.case_id = c1.case_id
+            JOIN cases c2 ON lt2.case_id = c2.case_id
+            JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
+            ORDER BY ltc.timestamp DESC
+        """, conn)
+        return completed_comparisons
+    finally:
+        conn.close()
+
+def clear_data_cache():
+    """Clear all cached data to refresh after database changes"""
+    get_database_counts.clear()
+    get_overview_tests.clear()
+    get_pending_tests.clear()
+    get_validated_tests.clear()
+    get_completed_comparisons.clear()
+
+def bulk_update_bt_scores(results_df):
+    """Efficiently update bt_scores in bulk to avoid N+1 queries"""
+    valid_updates = results_df[results_df['bt_score'].notna()]
+    if len(valid_updates) == 0:
+        return
+    
+    try:
+        if DB_TYPE == 'postgresql':
+            # Use PostgreSQL's efficient UPDATE with VALUES
+            values_list = []
+            for _, row in valid_updates.iterrows():
+                values_list.append(f"({row['test_id']}, {row['bt_score']})")
+            
+            if values_list:
+                values_str = ','.join(values_list)
+                query = f"""
+                    UPDATE legal_tests 
+                    SET bt_score = v.score 
+                    FROM (VALUES {values_str}) AS v(test_id, score) 
+                    WHERE legal_tests.test_id = v.test_id
+                """
+                execute_sql(query)
+        else:
+            # SQLite fallback - still use individual updates but more efficiently
+            conn = get_database_connection()
+            try:
+                cursor = conn.cursor()
+                update_data = [(row['bt_score'], row['test_id']) for _, row in valid_updates.iterrows()]
+                cursor.executemany("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", update_data)
+                conn.commit()
+            finally:
+                conn.close()
+                
+    except Exception as update_error:
+        st.error(f"Failed to bulk update bt_scores: {update_error}")
+
 def setup_database():
     """Creates the database and tables if they don't exist."""
     
@@ -740,6 +870,20 @@ def setup_database():
             UNIQUE(test_id_1, test_id_2)
         );
     ''')
+    
+    # Add performance indexes for frequently queried columns
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_tests_case_id ON legal_tests (case_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_tests_validation_status ON legal_tests (validation_status);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_cases_decision_year ON cases (decision_year);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_cases_citation ON cases (citation);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_test_comparisons_test_id_1 ON legal_test_comparisons (test_id_1);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_test_comparisons_test_id_2 ON legal_test_comparisons (test_id_2);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_test_comparisons_more_rule_like ON legal_test_comparisons (more_rule_like_test_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_test_comparisons_method ON legal_test_comparisons (comparison_method);')
+    
+    # Create composite indexes for commonly used multi-column queries
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_tests_case_validation ON legal_tests (case_id, validation_status);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_legal_test_comparisons_pair ON legal_test_comparisons (test_id_1, test_id_2);')
 
 def load_data_from_parquet(uploaded_file):
     """Loads SCC cases from a Parquet file into the database, with robust duplicate handling and filtering by Excel citations."""
@@ -988,15 +1132,8 @@ if __name__ == "__main__":
 
     setup_database()
 
-    # Calculate progress indicators
-    conn = get_database_connection()
-    try:
-        cases_count = int(pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0])
-        tests_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0])
-        comparisons_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0])
-        validated_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0])
-    finally:
-        conn.close()
+    # Calculate progress indicators (cached)
+    cases_count, tests_count, comparisons_count, validated_count = get_database_counts()
 
     # Section 1: Data Loading
     data_status = "✅ Complete" if cases_count > 0 else "📋 Pending"
@@ -1065,7 +1202,23 @@ if __name__ == "__main__":
             if st.button("Start Session"):
                 conn = get_database_connection()
                 try:
-                    cases_to_sample = pd.read_sql(f"SELECT * FROM cases ORDER BY RANDOM() LIMIT {num_cases_to_sample}", conn)
+                    # More efficient random sampling - only select needed columns
+                    if DB_TYPE == 'postgresql':
+                        # PostgreSQL: Use TABLESAMPLE for better performance on large datasets
+                        cases_to_sample = pd.read_sql(f"""
+                            SELECT case_id, case_name, citation, decision_year, scc_url 
+                            FROM cases 
+                            ORDER BY RANDOM() 
+                            LIMIT {num_cases_to_sample}
+                        """, conn)
+                    else:
+                        # SQLite: Keep existing method but limit columns
+                        cases_to_sample = pd.read_sql(f"""
+                            SELECT case_id, case_name, citation, decision_year, scc_url 
+                            FROM cases 
+                            ORDER BY RANDOM() 
+                            LIMIT {num_cases_to_sample}
+                        """, conn)
                 finally:
                     conn.close()
                 st.session_state.cases_to_sample = cases_to_sample
@@ -1073,16 +1226,27 @@ if __name__ == "__main__":
 
             # Display sampling results
             if 'cases_to_sample' in st.session_state and len(st.session_state.cases_to_sample) > 0:
+                # Batch query for all case extraction statuses (avoid N+1 problem)
+                case_ids = st.session_state.cases_to_sample['case_id'].tolist()
+                case_ids_str = ','.join(map(str, case_ids))
+                
+                conn = get_database_connection()
+                try:
+                    extracted_cases = pd.read_sql(f"""
+                        SELECT case_id, validation_status 
+                        FROM legal_tests 
+                        WHERE case_id IN ({case_ids_str})
+                    """, conn)
+                finally:
+                    conn.close()
+                
+                # Create a lookup dict for faster access
+                extracted_lookup = {row['case_id']: row['validation_status'] for _, row in extracted_cases.iterrows()}
+                
                 # Check for completed extractions to remove
                 cases_to_remove = []
                 for index, row in st.session_state.cases_to_sample.iterrows():
-                    conn = get_database_connection()
-                    try:
-                        test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
-                    finally:
-                        conn.close()
-                    
-                    if not test_info.empty:
+                    if row['case_id'] in extracted_lookup:
                         # Case has been extracted, mark for removal
                         if f"show_success_{row['case_id']}" not in st.session_state:
                             st.session_state[f"show_success_{row['case_id']}"] = True
@@ -1109,13 +1273,8 @@ if __name__ == "__main__":
                     with st.container():
                         st.subheader(f"{row['case_name']} ({row['citation']})")
                         
-                        conn = get_database_connection()
-                        try:
-                            test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
-                        finally:
-                            conn.close()
-
-                        if not test_info.empty:
+                        # Use the batch-loaded data instead of individual queries
+                        if row['case_id'] in extracted_lookup:
                             # This case is extracted but not yet removed (showing success message)
                             continue
                         else:
@@ -1183,24 +1342,11 @@ if __name__ == "__main__":
             # Pagination for overview table
             items_per_page = st.selectbox("Tests per page:", [5, 10, 20], index=1, key="overview_pagination")
             
-            conn = get_database_connection()
-            try:
-                overview_df = pd.read_sql("""
-                    SELECT 
-                        c.decision_year,
-                        c.case_name,
-                        c.citation,
-                        c.scc_url,
-                        lt.test_novelty,
-                        lt.extracted_test_summary,
-                        lt.validation_status,
-                        lt.test_id
-                    FROM cases c
-                    JOIN legal_tests lt ON c.case_id = lt.case_id
-                    ORDER BY c.decision_year DESC, c.case_name
-                """, conn)
-            finally:
-                conn.close()
+            # Use cached overview data
+            overview_df = get_overview_tests()
+            # Select only the columns we need for the overview display
+            overview_df = overview_df[['decision_year', 'case_name', 'citation', 'scc_url', 
+                                     'test_novelty', 'extracted_test_summary', 'validation_status', 'test_id']]
             
             # Search functionality
             search_term = st.text_input("🔍 Search tests:", placeholder="Search by case name, citation, or test content...")
@@ -1264,47 +1410,43 @@ if __name__ == "__main__":
                     with col1:
                         st.write(f"**{row['case_name']}** ({row['decision_year']}) - {row['citation']}")
                         
-                        # Show truncated or full test summary with clickable ellipses
-                        if len(row['extracted_test_summary']) > 200 and not is_expanded:
-                            col_text, col_expand = st.columns([6, 1])
-                            with col_text:
-                                st.write(f"*{row['extracted_test_summary'][:200]}*")
-                            with col_expand:
-                                if st.button("...", key=f"expand_{row['test_id']}", help="Click to expand full details"):
-                                    st.session_state[f'expanded_test_{row["test_id"]}'] = True
-                                    st.rerun()
+                        # Show test summary with expand/collapse functionality
+                        if not is_expanded:
+                            # Show truncated text if long, otherwise show full text
+                            if len(row['extracted_test_summary']) > 200:
+                                col_text, col_expand = st.columns([6, 1])
+                                with col_text:
+                                    st.write(f"*{row['extracted_test_summary'][:200]}...*")
+                                with col_expand:
+                                    if st.button("📋", key=f"expand_{row['test_id']}", help="Click to see full details"):
+                                        st.session_state[f'expanded_test_{row["test_id"]}'] = True
+                                        st.rerun()
+                            else:
+                                col_text, col_expand = st.columns([6, 1])
+                                with col_text:
+                                    st.write(f"*{row['extracted_test_summary']}*")
+                                with col_expand:
+                                    if st.button("📋", key=f"expand_{row['test_id']}", help="Click to see full details"):
+                                        st.session_state[f'expanded_test_{row["test_id"]}'] = True
+                                        st.rerun()
                         else:
                             st.write(f"*{row['extracted_test_summary']}*")
-                            if is_expanded:
-                                if st.button("🔼 Collapse", key=f"collapse_{row['test_id']}"):
-                                    st.session_state[f'expanded_test_{row["test_id"]}'] = False
-                                    st.rerun()
+                            if st.button("🔼 Collapse", key=f"collapse_{row['test_id']}"):
+                                st.session_state[f'expanded_test_{row["test_id"]}'] = False
+                                st.rerun()
                         
                         # Show expanded details if card is expanded
                         if is_expanded:
                             st.write("**📋 Full Test Details:**")
                             st.write(f"**Test Novelty:** {row['test_novelty']}")
                             
-                            # Get additional details from database
-                            conn = get_database_connection()
-                            try:
-                                full_details = pd.read_sql(f"""
-                                    SELECT lt.*, c.area_of_law, c.full_text
-                                    FROM legal_tests lt 
-                                    JOIN cases c ON lt.case_id = c.case_id 
-                                    WHERE lt.test_id = {row['test_id']}
-                                """, conn)
-                            finally:
-                                conn.close()
-                            
-                            if not full_details.empty:
-                                detail = full_details.iloc[0]
-                                st.write(f"**Source Paragraphs:** {detail['source_paragraphs']}")
-                                st.write(f"**Source Type:** {detail['source_type']}")
-                                st.write(f"**Area of Law:** {detail['area_of_law']}")
-                                st.write(f"**Validator:** {detail['validator_name'] or 'Not set'}")
-                                if detail['bt_score'] is not None:
-                                    st.write(f"**Bradley-Terry Score:** {detail['bt_score']:.4f}")
+                            # Use pre-loaded data instead of database query for better performance
+                            st.write(f"**Source Paragraphs:** {row.get('source_paragraphs', 'Not available')}")
+                            st.write(f"**Source Type:** {row.get('source_type', 'AI Generated')}")
+                            st.write(f"**Area of Law:** {row.get('area_of_law', 'Not specified')}")
+                            st.write(f"**Validator:** {row.get('validator_name', 'Not set') or 'Not set'}")
+                            if row.get('bt_score') is not None:
+                                st.write(f"**Bradley-Terry Score:** {row['bt_score']:.4f}")
                         
                         st.markdown(f"[🔗 SCC Decision]({row['scc_url']})")
                     
@@ -1317,12 +1459,8 @@ if __name__ == "__main__":
                                 st.rerun()
                     st.divider()
 
-    # Section 4: Human Validation
-    conn = get_database_connection()
-    try:
-        pending_tests = pd.read_sql("SELECT lt.*, c.case_name, c.scc_url FROM legal_tests lt JOIN cases c ON lt.case_id = c.case_id WHERE lt.validation_status = 'pending'", conn)
-    finally:
-        conn.close()
+    # Section 4: Human Validation (cached)
+    pending_tests = get_pending_tests()
     
     validation_status = f"✅ {validated_count} validated" if validated_count > 0 and len(pending_tests) == 0 else f"⚠️ {len(pending_tests)} waiting to be validated" if len(pending_tests) > 0 else "📋 No tests yet"
     with st.expander(f"🔍 **4. Human Validation** - {validation_status}", expanded=(len(pending_tests) > 0 and validated_count < 5)):
@@ -1387,6 +1525,7 @@ if __name__ == "__main__":
                                           (edited_novelty, edited_summary, edited_paragraphs, 
                                            st.session_state.validator_name, row['test_id']))
                                 st.session_state.editing_test_id = None
+                                clear_data_cache()  # Clear cache to reflect changes
                                 st.success(f"Test for {row['case_name']} updated and marked as accurate.")
                                 st.rerun()
                         
@@ -1442,6 +1581,7 @@ if __name__ == "__main__":
                             if st.button("✅ Accurate", key=f"accurate_{row['test_id']}"):
                                 execute_sql("UPDATE legal_tests SET validation_status = 'accurate', validator_name = ? WHERE test_id = ?", 
                                           (st.session_state.validator_name, row['test_id']))
+                                clear_data_cache()  # Clear cache to reflect changes
                                 st.success(f"Test marked as accurate.")
                                 st.rerun()
                             
@@ -1449,19 +1589,9 @@ if __name__ == "__main__":
                                 st.session_state.editing_test_id = row['test_id']
                                 st.rerun()
 
-    # Section 5: Pairwise Comparisons
+    # Section 5: Pairwise Comparisons (cached)
     # Check for validated tests available for comparison
-    conn = get_database_connection()
-    try:
-        validated_tests = pd.read_sql("""
-            SELECT lt.*, c.case_name, c.citation, c.scc_url 
-        FROM legal_tests lt 
-        JOIN cases c ON lt.case_id = c.case_id 
-        WHERE lt.validation_status = 'accurate'
-        ORDER BY c.decision_year DESC
-    """, conn)
-    finally:
-        conn.close()
+    validated_tests = get_validated_tests()
     
     comparison_status = f"✅ {comparisons_count} completed" if comparisons_count > 0 else f"🔄 Ready for comparison" if len(validated_tests) >= 2 else f"📋 Need {2 - len(validated_tests)} more validated tests"
     with st.expander(f"⚖️ **5. Pairwise Comparisons** - {comparison_status}", expanded=(len(validated_tests) >= 2 and comparisons_count < 10)):
@@ -1653,29 +1783,8 @@ if __name__ == "__main__":
                 if comparisons_count == 0:
                     st.info("No comparisons completed yet. Complete some comparisons above to see them here.")
                 else:
-                    # Get all completed comparisons with case details - open new connection
-                    conn = get_database_connection()
-                    try:
-                        completed_comparisons = pd.read_sql("""
-                            SELECT 
-                                ltc.*,
-                                c1.case_name as case1_name, c1.citation as case1_citation, c1.decision_year as case1_year,
-                                c2.case_name as case2_name, c2.citation as case2_citation, c2.decision_year as case2_year,
-                                lt1.extracted_test_summary as test1_summary,
-                                lt2.extracted_test_summary as test2_summary,
-                                winner_c.case_name as winner_name,
-                                winner_lt.extracted_test_summary as winner_summary
-                            FROM legal_test_comparisons ltc
-                            JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
-                            JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
-                            JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
-                        JOIN cases c1 ON lt1.case_id = c1.case_id
-                        JOIN cases c2 ON lt2.case_id = c2.case_id
-                        JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
-                        ORDER BY ltc.timestamp DESC
-                    """, conn)
-                    finally:
-                        conn.close()
+                    # Get all completed comparisons with cached data
+                    completed_comparisons = get_completed_comparisons()
                     
                     if not completed_comparisons.empty:
                         st.write(f"**{len(completed_comparisons)} completed comparisons:**")
@@ -1751,44 +1860,16 @@ if __name__ == "__main__":
                                 st.write(f"*{comp['case1_name']}* ({comp['case1_year']})")
                                 st.write(f"Citation: {comp['case1_citation']}")
                                 
-                                # Expandable test summary for Test A
-                                is_test_a_expanded = st.session_state.get(f'expanded_test_a_{comp["comparison_id"]}', False)
-                                if len(comp['test1_summary']) > 150 and not is_test_a_expanded:
-                                    col_text_a, col_expand_a = st.columns([6, 1])
-                                    with col_text_a:
-                                        st.write(f"Test: {comp['test1_summary'][:150]}")
-                                    with col_expand_a:
-                                        if st.button("...", key=f"expand_test_a_{comp['comparison_id']}", help="Click to see full test"):
-                                            st.session_state[f'expanded_test_a_{comp["comparison_id"]}'] = True
-                                            st.rerun()
-                                else:
-                                    st.write(f"Test: {comp['test1_summary']}")
-                                    if is_test_a_expanded:
-                                        if st.button("🔼", key=f"collapse_test_a_{comp['comparison_id']}", help="Collapse"):
-                                            st.session_state[f'expanded_test_a_{comp["comparison_id"]}'] = False
-                                            st.rerun()
+                                # Show full test summary for Test A
+                                st.write(f"**Test:** {comp['test1_summary']}")
                             
                             with col2:
                                 st.write("**📋 Test B:**")
                                 st.write(f"*{comp['case2_name']}* ({comp['case2_year']})")
                                 st.write(f"Citation: {comp['case2_citation']}")
                                 
-                                # Expandable test summary for Test B
-                                is_test_b_expanded = st.session_state.get(f'expanded_test_b_{comp["comparison_id"]}', False)
-                                if len(comp['test2_summary']) > 150 and not is_test_b_expanded:
-                                    col_text_b, col_expand_b = st.columns([6, 1])
-                                    with col_text_b:
-                                        st.write(f"Test: {comp['test2_summary'][:150]}")
-                                    with col_expand_b:
-                                        if st.button("...", key=f"expand_test_b_{comp['comparison_id']}", help="Click to see full test"):
-                                            st.session_state[f'expanded_test_b_{comp["comparison_id"]}'] = True
-                                            st.rerun()
-                                else:
-                                    st.write(f"Test: {comp['test2_summary']}")
-                                    if is_test_b_expanded:
-                                        if st.button("🔼", key=f"collapse_test_b_{comp['comparison_id']}", help="Collapse"):
-                                            st.session_state[f'expanded_test_b_{comp["comparison_id"]}'] = False
-                                            st.rerun()
+                                # Show full test summary for Test B
+                                st.write(f"**Test:** {comp['test2_summary']}")
                             
                             with col3:
                                 st.write("**🏆 Winner:**")
@@ -1989,14 +2070,8 @@ if __name__ == "__main__":
                 analyzed_df = results_df.dropna(subset=['bt_score']).sort_values('bt_score', ascending=False)
                 unanalyzed_df = results_df[results_df['bt_score'].isna()]
                 
-                # Update bt_scores in database (only for non-NaN values)
-                for _, row in results_df.iterrows():
-                    if pd.notna(row['bt_score']):
-                        try:
-                            execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
-                                     (row['bt_score'], row['test_id']))
-                        except Exception as update_error:
-                            st.error(f"Failed to update bt_score for test_id {row['test_id']}: {update_error}")
+                # Update bt_scores in database (bulk operation for better performance)
+                bulk_update_bt_scores(results_df)
                 
                 # Store analysis results in session state
                 st.session_state.analysis_results = {
@@ -2312,16 +2387,8 @@ if __name__ == "__main__":
                 else:
                     st.error("No tests could be analyzed. This suggests a fundamental issue with the comparison data.")
                 
-                # Update bt_scores in database (only for non-NaN values)
-                for _, row in results_df.iterrows():
-                    if pd.notna(row['bt_score']):
-                        try:
-                            execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
-                                     (row['bt_score'], row['test_id']))
-                        except Exception as update_error:
-                            st.error(f"Failed to update bt_score for test_id {row['test_id']}: {update_error}")
-                            import traceback
-                            st.text(f"Update error traceback: {traceback.format_exc()}")
+                # Update bt_scores in database (bulk operation for better performance)
+                bulk_update_bt_scores(results_df)
                 
                 # Store analysis results in session state
                 st.session_state.analysis_results = {

@@ -25,8 +25,15 @@ if not DATABASE_URL:
     DATABASE_URL = os.getenv('DATABASE_URL')
 
 if DATABASE_URL:
-    # Production: Use PostgreSQL (Neon)
-    DB_ENGINE = create_engine(DATABASE_URL)
+    # Production: Use PostgreSQL (Neon) with connection pooling
+    DB_ENGINE = create_engine(
+        DATABASE_URL,
+        pool_size=10,          # Maximum number of permanent connections to keep
+        max_overflow=20,       # Maximum number of connections that can overflow the pool
+        pool_pre_ping=True,    # Validate connections before use
+        pool_recycle=3600,     # Recycle connections after 1 hour
+        echo=False             # Set to True for SQL debugging
+    )
     DB_TYPE = 'postgresql'
     DB_NAME = None  # Will use engine for connections
 else:
