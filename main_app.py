@@ -1570,12 +1570,16 @@ if __name__ == "__main__":
                 if 'selected_gemini_model' not in st.session_state or not st.session_state.selected_gemini_model:
                     st.error("Please select a Gemini model first.")
                 else:
-                    # Get remaining pairs
-                    compared_pairs = pd.read_sql("""
-                        SELECT test_id_1, test_id_2 FROM legal_test_comparisons
-                        UNION
-                        SELECT test_id_2 as test_id_1, test_id_1 as test_id_2 FROM legal_test_comparisons
-                    """, conn)
+                    # Get remaining pairs with fresh connection
+                    ai_conn = get_database_connection()
+                    try:
+                        compared_pairs = pd.read_sql("""
+                            SELECT test_id_1, test_id_2 FROM legal_test_comparisons
+                            UNION
+                            SELECT test_id_2 as test_id_1, test_id_1 as test_id_2 FROM legal_test_comparisons
+                        """, ai_conn)
+                    finally:
+                        ai_conn.close()
                     
                     remaining_pairs = []
                     for i, test1 in validated_tests.iterrows():
