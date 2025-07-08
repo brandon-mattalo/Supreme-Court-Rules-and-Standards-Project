@@ -4,11 +4,18 @@ Meta-level interface for creating, managing, and comparing experiments
 """
 
 import streamlit as st
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from config import GEMINI_MODELS, execute_sql, get_database_connection
 import json
+
+# Lazy imports for performance
+def _get_pandas():
+    import pandas as pd
+    return pd
+
+def _get_numpy():
+    import numpy as np
+    return np
 from utils.case_management import (
     get_database_counts, load_data_from_parquet, clear_database, 
     get_case_summary, get_available_cases, filter_cases_by_criteria,
@@ -17,8 +24,9 @@ from utils.case_management import (
     calculate_bradley_terry_comparisons
 )
 
+@st.cache_resource
 def initialize_experiment_tables():
-    """Initialize database tables for experiment management"""
+    """Initialize database tables for experiment management (cached - runs only once)"""
     
     # Cases table (v2) - Just store the cases and metadata
     from config import DB_TYPE
@@ -347,6 +355,87 @@ def get_case_statistics():
     
     return stats
 
+# Cache CSS injection for startup performance
+@st.cache_data(ttl=3600)  # 1 hour cache for CSS
+def inject_sidebar_css():
+    """Inject cached CSS for sidebar styling"""
+    st.markdown("""
+    <style>
+    /* Compact sidebar styling */
+    .stSidebar .stButton > button {
+        padding: 0.5rem 1rem !important;
+        margin: 0.2rem 0 !important;
+        border-radius: 6px !important;
+        font-size: 0.9rem !important;
+        height: auto !important;
+        min-height: 2.5rem !important;
+    }
+    
+    /* Selected navigation buttons - blue theme */
+    div[data-testid="stSidebar"] button[kind="secondary"] {
+        background-color: #0066cc !important;
+        color: white !important;
+        border: 1px solid #004499 !important;
+        box-shadow: 0 2px 4px rgba(0,102,204,0.2) !important;
+    }
+    div[data-testid="stSidebar"] button[kind="secondary"]:hover {
+        background-color: #0056b3 !important;
+        color: white !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 8px rgba(0,102,204,0.3) !important;
+    }
+    
+    /* Action buttons - red theme */
+    div[data-testid="stSidebar"] button[kind="primary"] {
+        background-color: #ff4b4b !important;
+        color: white !important;
+        border: 1px solid #cc0000 !important;
+        box-shadow: 0 2px 4px rgba(255,75,75,0.2) !important;
+    }
+    div[data-testid="stSidebar"] button[kind="primary"]:hover {
+        background-color: #e60000 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 8px rgba(255,75,75,0.3) !important;
+    }
+    
+    /* Default buttons - clean styling */
+    div[data-testid="stSidebar"] button:not([kind]) {
+        background-color: #f8f9fa !important;
+        color: #333 !important;
+        border: 1px solid #dee2e6 !important;
+        transition: all 0.2s ease !important;
+    }
+    div[data-testid="stSidebar"] button:not([kind]):hover {
+        background-color: #e9ecef !important;
+        color: #000 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+    }
+    
+    /* Experiment list styling */
+    .stSidebar .stExpander {
+        border: 1px solid #dee2e6 !important;
+        border-radius: 8px !important;
+        margin: 0.5rem 0 !important;
+    }
+    
+    /* Compact spacing */
+    .stSidebar .stMarkdown {
+        margin: 0.3rem 0 !important;
+    }
+    
+    /* Settings button special styling */
+    div[data-testid="stSidebar"] button[aria-label*="Settings"] {
+        padding: 0.3rem 0.5rem !important;
+        font-size: 1.1rem !important;
+        min-height: 2rem !important;
+        border-radius: 50% !important;
+        width: 2.5rem !important;
+        height: 2.5rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # Cache cost calculation parameters for 300 seconds (5 min - very stable)
 @st.cache_data(ttl=300)
 def get_cost_calculation_params(n_cases, avg_selected_case_length):
@@ -391,6 +480,7 @@ def show_experiment_overview():
     columns = ['experiment_id', 'name', 'description', 'status', 'ai_model', 
                'extraction_strategy', 'modified_date', 'total_cost', 'total_tests', 'total_comparisons']
     
+    pd = _get_pandas()
     df = pd.DataFrame(experiments_data, columns=columns)
     
     # Get cached case statistics
@@ -899,6 +989,7 @@ def show_experiment_comparison():
     # Convert to DataFrame for easier handling
     columns = ['experiment_id', 'name', 'ai_model', 'temperature', 'extraction_strategy', 
                'modified_date', 'run_count', 'total_tests', 'total_comparisons', 'avg_cost', 'last_run']
+    pd = _get_pandas()
     exp_df = pd.DataFrame(experiments_with_results, columns=columns)
     
     # Experiment Selection
@@ -952,6 +1043,7 @@ def show_experiment_comparison():
                 'Tests per Run': exp_info['total_tests'] / exp_info['run_count'] if exp_info['run_count'] > 0 else 0
             })
         
+        pd = _get_pandas()
         comparison_df = pd.DataFrame(comparison_data)
         st.dataframe(comparison_df, use_container_width=True)
         
@@ -1039,6 +1131,7 @@ def show_experiment_comparison():
         st.write("**Recent Experiment Activity:**")
         
         # Convert last_run to datetime for plotting
+        pd = _get_pandas()
         exp_df['last_run_date'] = pd.to_datetime(exp_df['last_run'])
         recent_activity = exp_df.sort_values('last_run_date', ascending=False).head(10)
         
@@ -1065,8 +1158,8 @@ def show_experiment_comparison():
     else:
         st.info("No experiment history available.")
 
-# Cache experiments list for 30 seconds
-@st.cache_data(ttl=30)
+# Cache experiments list for 5 minutes (longer cache for startup performance)
+@st.cache_data(ttl=300)
 def get_experiments_list():
     """Get list of experiments for navigation (reuses overview data for efficiency)"""
     try:
@@ -1089,83 +1182,8 @@ def show_sidebar_navigation():
     if 'selected_experiment' not in st.session_state:
         st.session_state.selected_experiment = None
     
-    # Custom CSS for compact application-like sidebar
-    st.markdown("""
-    <style>
-    /* Compact sidebar styling */
-    .stSidebar .stButton > button {
-        padding: 0.5rem 1rem !important;
-        margin: 0.2rem 0 !important;
-        border-radius: 6px !important;
-        font-size: 0.9rem !important;
-        height: auto !important;
-        min-height: 2.5rem !important;
-    }
-    
-    /* Selected navigation buttons - blue theme */
-    div[data-testid="stSidebar"] button[kind="secondary"] {
-        background-color: #0066cc !important;
-        color: white !important;
-        border: 1px solid #004499 !important;
-        box-shadow: 0 2px 4px rgba(0,102,204,0.2) !important;
-    }
-    div[data-testid="stSidebar"] button[kind="secondary"]:hover {
-        background-color: #0056b3 !important;
-        color: white !important;
-        transform: translateY(-1px) !important;
-        box-shadow: 0 4px 8px rgba(0,102,204,0.3) !important;
-    }
-    
-    /* Action buttons - red theme */
-    div[data-testid="stSidebar"] button[kind="primary"] {
-        background-color: #ff4b4b !important;
-        color: white !important;
-        border: 1px solid #cc0000 !important;
-        box-shadow: 0 2px 4px rgba(255,75,75,0.2) !important;
-    }
-    div[data-testid="stSidebar"] button[kind="primary"]:hover {
-        background-color: #e60000 !important;
-        transform: translateY(-1px) !important;
-        box-shadow: 0 4px 8px rgba(255,75,75,0.3) !important;
-    }
-    
-    /* Default buttons - clean styling */
-    div[data-testid="stSidebar"] button:not([kind]) {
-        background-color: #f8f9fa !important;
-        color: #333 !important;
-        border: 1px solid #dee2e6 !important;
-        transition: all 0.2s ease !important;
-    }
-    div[data-testid="stSidebar"] button:not([kind]):hover {
-        background-color: #e9ecef !important;
-        color: #000 !important;
-        transform: translateY(-1px) !important;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
-    }
-    
-    /* Experiment list styling */
-    .stSidebar .stExpander {
-        border: 1px solid #dee2e6 !important;
-        border-radius: 8px !important;
-        margin: 0.5rem 0 !important;
-    }
-    
-    /* Compact spacing */
-    .stSidebar .stMarkdown {
-        margin: 0.3rem 0 !important;
-    }
-    
-    /* Settings button special styling */
-    div[data-testid="stSidebar"] button[aria-label*="Settings"] {
-        padding: 0.3rem 0.5rem !important;
-        font-size: 1.1rem !important;
-        min-height: 2rem !important;
-        border-radius: 50% !important;
-        width: 2.5rem !important;
-        height: 2.5rem !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    # Inject cached CSS for compact application-like sidebar
+    inject_sidebar_css()
     
     # Navigation section header
     st.sidebar.markdown("**📋 Navigation**")
