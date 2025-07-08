@@ -283,60 +283,123 @@ def initialize_experiment_tables():
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_experiment_id ON v2_experiment_comparisons (experiment_id);')
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_results_experiment_id ON v2_experiment_results (experiment_id);')
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_selected_cases_case_id ON v2_experiment_selected_cases (case_id);')
+    
+    # Additional performance indexes
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_modified_date ON v2_experiments (modified_date DESC);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_date ON v2_experiment_runs (run_date);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_case_length ON v2_cases (case_length) WHERE case_length IS NOT NULL;')
+
+# Cache experiment overview data for 60 seconds
+@st.cache_data(ttl=60)
+def get_experiments_overview_data():
+    """Get optimized experiment data for overview with minimal columns"""
+    experiments_data = execute_sql("""
+        SELECT 
+            e.experiment_id, e.name, e.description, e.status, e.ai_model, 
+            e.extraction_strategy, e.modified_date,
+            COALESCE(SUM(er.total_cost_usd), 0) as total_cost,
+            COALESCE(SUM(er.tests_extracted), 0) as total_tests,
+            COALESCE(SUM(er.comparisons_completed), 0) as total_comparisons
+        FROM v2_experiments e
+        LEFT JOIN v2_experiment_runs er ON e.experiment_id = er.experiment_id
+        GROUP BY e.experiment_id, e.name, e.description, e.status, e.ai_model, e.extraction_strategy, e.modified_date
+        ORDER BY e.modified_date DESC
+        LIMIT 50
+    """, fetch=True)
+    return experiments_data
+
+# Cache case statistics for 120 seconds (changes less frequently)
+@st.cache_data(ttl=120)
+def get_case_statistics():
+    """Get case count and length statistics"""
+    stats = {}
+    
+    # Get counts
+    selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
+    total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
+    
+    # Get case length statistics with single query
+    if selected_cases_count > 0:
+        case_stats = execute_sql("""
+            SELECT 
+                AVG(CASE WHEN s.case_id IS NOT NULL THEN c.case_length END) as avg_selected_length,
+                AVG(c.case_length) as avg_all_length
+            FROM v2_cases c 
+            LEFT JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
+            WHERE c.case_length IS NOT NULL
+        """, fetch=True)
+        
+        if case_stats and case_stats[0]:
+            stats['avg_selected_case_length'] = float(case_stats[0][0]) if case_stats[0][0] else 52646.0
+            stats['avg_all_case_length'] = float(case_stats[0][1]) if case_stats[0][1] else 52646.0
+        else:
+            stats['avg_selected_case_length'] = 52646.0
+            stats['avg_all_case_length'] = 52646.0
+    else:
+        # If no selected cases, get overall average
+        all_avg = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
+        avg_length = float(all_avg[0][0]) if all_avg and all_avg[0][0] else 52646.0
+        stats['avg_selected_case_length'] = avg_length  
+        stats['avg_all_case_length'] = avg_length
+    
+    stats['selected_cases_count'] = selected_cases_count
+    stats['total_cases_count'] = total_cases_count
+    
+    return stats
+
+# Cache cost calculation parameters for 300 seconds (5 min - very stable)
+@st.cache_data(ttl=300)
+def get_cost_calculation_params(n_cases, avg_selected_case_length):
+    """Pre-calculate shared cost parameters for all experiment cards"""
+    required_comparisons = calculate_bradley_terry_comparisons(n_cases)
+    
+    # Calculate shared cost parameters
+    avg_tokens_selected = avg_selected_case_length / 4
+    system_prompt_tokens = 100
+    extraction_prompt_tokens = 200
+    extracted_test_tokens = 325  # ~250 words * 1.3 tokens/word
+    
+    # Base cost per extraction for any model
+    extraction_input_tokens = avg_tokens_selected + system_prompt_tokens + extraction_prompt_tokens
+    
+    # Bradley-Terry parameters for display
+    block_size = 15  # 12 core + 3 bridge cases per block
+    core_cases_per_block = 12
+    comparisons_per_block = 105
+    
+    return {
+        'required_comparisons': required_comparisons,
+        'extraction_input_tokens': extraction_input_tokens,
+        'extracted_test_tokens': extracted_test_tokens,
+        'block_size': block_size,
+        'core_cases_per_block': core_cases_per_block,
+        'comparisons_per_block': comparisons_per_block
+    }
 
 def show_experiment_overview():
     """Display overview of all experiments"""
     st.header("📊 Experiment Overview")
     
-    # Get experiment data (v2)
-    experiments_data = execute_sql("""
-        SELECT 
-            e.*,
-            COUNT(er.run_id) as total_runs,
-            MAX(er.run_date) as last_run_date,
-            SUM(er.total_cost_usd) as total_cost,
-            SUM(er.tests_extracted) as total_tests,
-            SUM(er.comparisons_completed) as total_comparisons
-        FROM v2_experiments e
-        LEFT JOIN v2_experiment_runs er ON e.experiment_id = er.experiment_id
-        GROUP BY e.experiment_id
-        ORDER BY e.modified_date DESC
-    """, fetch=True)
+    # Get cached experiment data
+    experiments_data = get_experiments_overview_data()
     
     if not experiments_data:
         st.info("No experiments found. Create your first experiment below!")
         return
     
-    # Convert to DataFrame
-    columns = ['experiment_id', 'name', 'description', 'researcher_name', 'status', 'ai_model', 'temperature', 
-               'top_p', 'top_k', 'max_output_tokens', 'extraction_strategy', 'extraction_prompt',
-               'comparison_prompt', 'system_instruction', 'cost_limit_usd', 'created_date',
-               'modified_date', 'created_by', 'total_runs', 'last_run_date', 'total_cost',
-               'total_tests', 'total_comparisons']
+    # Convert to DataFrame with optimized columns
+    columns = ['experiment_id', 'name', 'description', 'status', 'ai_model', 
+               'extraction_strategy', 'modified_date', 'total_cost', 'total_tests', 'total_comparisons']
     
     df = pd.DataFrame(experiments_data, columns=columns)
     
-    # Get selected cases count and actual case length data for accurate calculations
+    # Get cached case statistics
     try:
-        selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
-        total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
-        
-        # Get real case length statistics
-        if selected_cases_count > 0:
-            # Average length of selected cases
-            selected_lengths = execute_sql("""
-                SELECT AVG(c.case_length) 
-                FROM v2_cases c 
-                JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
-                WHERE c.case_length IS NOT NULL
-            """, fetch=True)
-            avg_selected_case_length = float(selected_lengths[0][0]) if selected_lengths and selected_lengths[0][0] else 52646.0
-        else:
-            avg_selected_case_length = 52646.0  # Overall average from database
-            
-        # Average length across all cases for full database estimates
-        all_lengths = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
-        avg_all_case_length = float(all_lengths[0][0]) if all_lengths and all_lengths[0][0] else 52646.0
+        stats = get_case_statistics()
+        selected_cases_count = stats['selected_cases_count']
+        total_cases_count = stats['total_cases_count']
+        avg_selected_case_length = stats['avg_selected_case_length']
+        avg_all_case_length = stats['avg_all_case_length']
         
     except Exception as e:
         selected_cases_count = 0
@@ -344,14 +407,14 @@ def show_experiment_overview():
         avg_selected_case_length = 52646.0
         avg_all_case_length = 52646.0
     
-    # Calculate shared parameters once
+    # Calculate shared parameters once using cached function
     n_cases = selected_cases_count
-    required_comparisons = calculate_bradley_terry_comparisons(n_cases)
+    cost_params = get_cost_calculation_params(n_cases, avg_selected_case_length)
     
-    # Bradley-Terry parameters for display
-    block_size = 15  # 12 core + 3 bridge cases per block
-    core_cases_per_block = 12
-    comparisons_per_block = 105
+    required_comparisons = cost_params['required_comparisons']
+    block_size = cost_params['block_size']
+    core_cases_per_block = cost_params['core_cases_per_block']
+    comparisons_per_block = cost_params['comparisons_per_block']
     
     # Skip if no cases selected
     if n_cases == 0:
@@ -374,26 +437,19 @@ def show_experiment_overview():
                 with cols[idx]:
                     show_experiment_card(exp, n_cases, required_comparisons, 
                                         avg_selected_case_length, avg_all_case_length, 
-                                        total_cases_count, block_size, core_cases_per_block, 
-                                        comparisons_per_block)
+                                        total_cases_count, cost_params)
 
 def show_experiment_card(exp, n_cases, required_comparisons, avg_selected_case_length, 
-                        avg_all_case_length, total_cases_count, block_size, 
-                        core_cases_per_block, comparisons_per_block):
+                        avg_all_case_length, total_cases_count, cost_params):
     """Display a single experiment card"""
             
     # Get model pricing (prices are per million tokens)
     model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
     
-    # Calculate accurate costs based on real case lengths
-    avg_tokens_selected = avg_selected_case_length / 4
+    # Use pre-calculated cost parameters for efficiency
+    extraction_input_tokens = cost_params['extraction_input_tokens']
+    extracted_test_tokens = cost_params['extracted_test_tokens']
     
-    # Estimate costs (simplified for card display)
-    system_prompt_tokens = 100
-    extraction_prompt_tokens = 200
-    extracted_test_tokens = 325  # ~250 words * 1.3 tokens/word
-    
-    extraction_input_tokens = avg_tokens_selected + system_prompt_tokens + extraction_prompt_tokens
     extraction_cost_per_case = (extraction_input_tokens / 1_000_000) * model_pricing['input'] + (extracted_test_tokens / 1_000_000) * model_pricing['output']
     
     # Calculate estimates
@@ -1012,16 +1068,14 @@ def show_experiment_comparison():
 # Cache experiments list for 30 seconds
 @st.cache_data(ttl=30)
 def get_experiments_list():
-    """Get list of experiments for navigation"""
+    """Get list of experiments for navigation (reuses overview data for efficiency)"""
     try:
-        experiments = execute_sql("""
-            SELECT experiment_id, name, status
-            FROM v2_experiments
-            ORDER BY modified_date DESC
-        """, fetch=True)
+        # Reuse the cached overview data to avoid duplicate queries
+        experiments_data = get_experiments_overview_data()
         
-        if experiments:
-            return [{'id': exp[0], 'name': exp[1], 'status': exp[2]} for exp in experiments]
+        if experiments_data:
+            # Extract only the fields needed for navigation
+            return [{'id': exp[0], 'name': exp[1], 'status': exp[3]} for exp in experiments_data]
         return []
     except Exception as e:
         st.error(f"Error loading experiments: {e}")
