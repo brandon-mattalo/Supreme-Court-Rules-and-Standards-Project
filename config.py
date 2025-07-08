@@ -64,7 +64,29 @@ def execute_sql(query, params=None, fetch=False):
     """Execute SQL query with proper connection handling"""
     if DB_TYPE == 'postgresql':
         with DB_ENGINE.connect() as conn:
-            result = conn.execute(text(query), params or {})
+            # For PostgreSQL with SQLAlchemy, we need to handle parameters differently
+            if params:
+                # Convert positional parameters to a dictionary
+                if isinstance(params, (tuple, list)):
+                    # Count the number of ? placeholders
+                    param_count = query.count('?')
+                    if len(params) == param_count:
+                        # Replace ? with :param1, :param2, etc.
+                        new_query = query
+                        param_dict = {}
+                        for i, param in enumerate(params):
+                            placeholder = f":param{i}"
+                            new_query = new_query.replace('?', placeholder, 1)
+                            param_dict[f'param{i}'] = param
+                        result = conn.execute(text(new_query), param_dict)
+                    else:
+                        raise ValueError(f"Parameter count mismatch: {len(params)} params for {param_count} placeholders")
+                else:
+                    # Assume it's already a dictionary
+                    result = conn.execute(text(query), params)
+            else:
+                result = conn.execute(text(query))
+            
             if fetch:
                 return result.fetchall()
             conn.commit()

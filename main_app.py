@@ -1599,7 +1599,7 @@ if __name__ == "__main__":
                         for idx, (test1, test2) in enumerate(remaining_pairs):
                             try:
                                 comparison_result = run_comparison(test1['extracted_test_summary'], test2['extracted_test_summary'])
-                                comparison_data = LegalTestComparison.parse_raw(comparison_result)
+                                comparison_data = LegalTestComparison.model_validate_json(comparison_result)
                                 
                                 # Determine which test was selected as more rule-like
                                 # AI response should contain exactly "Test A" or "Test B"
