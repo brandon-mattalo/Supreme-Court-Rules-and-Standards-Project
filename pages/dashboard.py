@@ -1316,7 +1316,7 @@ def show_experiment_detail(experiment_id):
             st.error("Experiment not found!")
             return
         
-        st.title(f"🧪 Experiment #{exp['experiment_id']}: {exp['name']}")
+        st.header(f"Experiment #{exp['experiment_id']}: {exp['name']}")
         
         # Status with color
         status_colors = {
@@ -1327,25 +1327,15 @@ def show_experiment_detail(experiment_id):
         }
         st.markdown(f"**Status:** {status_colors.get(exp['status'], exp['status'])}")
         
-        # Get shared data for cost calculations
+        # Get shared data for cost calculations using cached functions
         try:
-            selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
-            total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
-            
-            if selected_cases_count > 0:
-                selected_lengths = execute_sql("""
-                    SELECT AVG(c.case_length) 
-                    FROM v2_cases c 
-                    JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
-                    WHERE c.case_length IS NOT NULL
-                """, fetch=True)
-                avg_selected_case_length = float(selected_lengths[0][0]) if selected_lengths and selected_lengths[0][0] else 52646.0
-            else:
-                avg_selected_case_length = 52646.0
-                
-            all_lengths = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
-            avg_all_case_length = float(all_lengths[0][0]) if all_lengths and all_lengths[0][0] else 52646.0
-        except:
+            stats = get_case_statistics()
+            selected_cases_count = stats['selected_cases_count']
+            total_cases_count = stats['total_cases_count']
+            avg_selected_case_length = stats['avg_selected_case_length']
+            avg_all_case_length = stats['avg_all_case_length']
+        except Exception as e:
+            st.warning(f"Could not load case statistics: {e}")
             selected_cases_count = 0
             total_cases_count = 0
             avg_selected_case_length = 52646.0
@@ -1360,28 +1350,40 @@ def show_experiment_detail(experiment_id):
         core_cases_per_block = 12
         comparisons_per_block = 105
         
-        # Get run statistics
-        runs_data = execute_sql("""
-            SELECT COUNT(*) as run_count,
-                   SUM(tests_extracted) as total_tests,
-                   SUM(comparisons_completed) as total_comparisons,
-                   SUM(total_cost_usd) as total_cost
-            FROM v2_experiment_runs 
-            WHERE experiment_id = ?
-        """, (experiment_id,), fetch=True)
-        
-        if runs_data and runs_data[0]:
-            stats = runs_data[0]
-            total_tests = stats[1] or 0
-            total_comparisons = stats[2] or 0
-            total_cost = stats[3] or 0
-        else:
+        # Get run statistics with safe handling
+        try:
+            runs_data = execute_sql("""
+                SELECT COUNT(*) as run_count,
+                       COALESCE(SUM(tests_extracted), 0) as total_tests,
+                       COALESCE(SUM(comparisons_completed), 0) as total_comparisons,
+                       COALESCE(SUM(total_cost_usd), 0) as total_cost
+                FROM v2_experiment_runs 
+                WHERE experiment_id = ?
+            """, (experiment_id,), fetch=True)
+            
+            if runs_data and runs_data[0]:
+                row = runs_data[0]
+                # Handle both tuple and row object access
+                if hasattr(row, '__getitem__'):
+                    total_tests = int(row[1]) if row[1] is not None else 0
+                    total_comparisons = int(row[2]) if row[2] is not None else 0
+                    total_cost = float(row[3]) if row[3] is not None else 0.0
+                else:
+                    total_tests = 0
+                    total_comparisons = 0 
+                    total_cost = 0.0
+            else:
+                total_tests = 0
+                total_comparisons = 0
+                total_cost = 0.0
+        except Exception as e:
+            st.warning(f"Could not load run statistics: {e}")
             total_tests = 0
             total_comparisons = 0
-            total_cost = 0
+            total_cost = 0.0
         
         # Layout in tabs for organization
-        tab1, tab2, tab3 = st.tabs(["📋 Configuration", "📊 Progress & Stats", "🎯 Actions"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 Configuration", "📊 Progress & Stats", "💰 Cost Estimates", "🎯 Actions"])
         
         with tab1:
             col1, col2 = st.columns(2)
@@ -1390,8 +1392,22 @@ def show_experiment_detail(experiment_id):
                 st.subheader("Basic Information")
                 st.write(f"**Description:** {exp['description'] or 'No description'}")
                 st.write(f"**Researcher:** {exp.get('researcher_name', 'Not specified')}")
-                st.write(f"**Created:** {exp['created_date'][:10] if exp['created_date'] else 'Unknown'}")
-                st.write(f"**Modified:** {exp['modified_date'][:10] if exp['modified_date'] else 'Unknown'}")
+                # Handle datetime objects properly
+                created_date = exp['created_date']
+                modified_date = exp['modified_date']
+                
+                if isinstance(created_date, str):
+                    created_str = created_date[:10] if created_date else 'Unknown'
+                else:
+                    created_str = created_date.strftime('%Y-%m-%d') if created_date else 'Unknown'
+                
+                if isinstance(modified_date, str):
+                    modified_str = modified_date[:10] if modified_date else 'Unknown'
+                else:
+                    modified_str = modified_date.strftime('%Y-%m-%d') if modified_date else 'Unknown'
+                
+                st.write(f"**Created:** {created_str}")
+                st.write(f"**Modified:** {modified_str}")
             
             with col2:
                 st.subheader("AI Configuration")
@@ -1436,6 +1452,107 @@ def show_experiment_detail(experiment_id):
                 st.write(f"**Comparison Strategy:** {comparison_strategy}")
         
         with tab3:
+            st.subheader("💰 Comprehensive Cost Analysis")
+            
+            # Get model pricing
+            model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
+            
+            # Calculate detailed cost parameters
+            cost_params = get_cost_calculation_params(n_cases, avg_selected_case_length)
+            extraction_input_tokens = cost_params['extraction_input_tokens']
+            extracted_test_tokens = cost_params['extracted_test_tokens']
+            
+            # Per-case extraction cost
+            extraction_cost_per_case = (extraction_input_tokens / 1_000_000) * model_pricing['input'] + (extracted_test_tokens / 1_000_000) * model_pricing['output']
+            
+            # Comparison cost (simplified estimate)
+            comparison_cost_per_pair = 0.0003  # Rough estimate for comparison operations
+            
+            # Pre-calculate all values
+            sample_extraction_cost = n_cases * extraction_cost_per_case
+            sample_comparison_cost = required_comparisons * comparison_cost_per_pair
+            sample_total_cost = sample_extraction_cost + sample_comparison_cost
+            
+            remaining_extractions = max(0, n_cases - total_tests)
+            remaining_comparisons = max(0, required_comparisons - total_comparisons)
+            remaining_extraction_cost = remaining_extractions * extraction_cost_per_case
+            remaining_comparison_cost = remaining_comparisons * comparison_cost_per_pair
+            remaining_total_cost = remaining_extraction_cost + remaining_comparison_cost
+            
+            full_db_comparisons = calculate_bradley_terry_comparisons(total_cases_count)
+            full_extraction_cost = total_cases_count * extraction_cost_per_case
+            full_comparison_cost = full_db_comparisons * comparison_cost_per_pair
+            full_total_cost = full_extraction_cost + full_comparison_cost
+            efficiency_ratio = (sample_total_cost / full_total_cost) * 100 if full_total_cost > 0 else 0
+            
+            # 2x2 Grid Layout for perfect alignment
+            # Top row
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("📋 Sample Cost Breakdown")
+                st.write(f"**Selected Cases:** {n_cases:,}")
+                st.write(f"**Required Comparisons:** {required_comparisons:,}")
+                st.metric("Sample Extraction Cost", f"${sample_extraction_cost:.2f}")
+                st.metric("Sample Comparison Cost", f"${sample_comparison_cost:.2f}")
+                st.metric("Sample Total Cost", f"${sample_total_cost:.2f}")
+            
+            with col2:
+                st.subheader("🌍 Full Database Estimates")
+                st.write(f"**Total Cases in Database:** {total_cases_count:,}")
+                st.write(f"**Required Comparisons:** {full_db_comparisons:,}")
+                st.metric("Full DB Extraction Cost", f"${full_extraction_cost:.2f}")
+                st.metric("Full DB Comparison Cost", f"${full_comparison_cost:.2f}")
+                st.metric("Full DB Total Cost", f"${full_total_cost:.2f}")
+            
+            # Divider
+            st.write("---")
+            
+            # Bottom row - aligned sections
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                st.subheader("🎯 Remaining Work")
+                st.metric("Remaining Extraction Cost", f"${remaining_extraction_cost:.2f}")
+                st.metric("Remaining Comparison Cost", f"${remaining_comparison_cost:.2f}")
+                st.metric("Remaining Total Cost", f"${remaining_total_cost:.2f}")
+            
+            with col4:
+                st.subheader("📊 Cost Efficiency")
+                st.metric("Sample vs Full DB", f"{efficiency_ratio:.1f}%")
+                
+                # Bradley-Terry efficiency
+                if total_cases_count > 15:
+                    full_pairwise = (total_cases_count * (total_cases_count - 1)) // 2
+                    bt_efficiency = ((full_pairwise - full_db_comparisons) / full_pairwise) * 100
+                    st.metric("Bradley-Terry Savings", f"{bt_efficiency:.1f}%")
+                else:
+                    st.metric("Bradley-Terry Savings", "N/A")
+            
+            # Detailed cost calculation breakdown
+            st.write("---")
+            with st.expander("🔍 Detailed Cost Calculation"):
+                st.write("**Token Calculations:**")
+                st.write(f"- Average case length: {avg_selected_case_length:,.0f} characters")
+                st.write(f"- Estimated tokens per case: {avg_selected_case_length / 4:,.0f} tokens")
+                st.write(f"- System prompt tokens: {100}")
+                st.write(f"- Extraction prompt tokens: {200}")
+                st.write(f"- Total input tokens per case: {extraction_input_tokens:,.0f}")
+                st.write(f"- Expected output tokens per case: {extracted_test_tokens}")
+                
+                st.write("**Model Pricing:**")
+                st.write(f"- Model: {exp['ai_model']}")
+                st.write(f"- Input cost: ${model_pricing['input']:.2f} per million tokens")
+                st.write(f"- Output cost: ${model_pricing['output']:.2f} per million tokens")
+                
+                st.write("**Per-Case Extraction Cost:**")
+                input_cost = (extraction_input_tokens / 1_000_000) * model_pricing['input']
+                output_cost = (extracted_test_tokens / 1_000_000) * model_pricing['output']
+                st.write(f"- Input cost: ${input_cost:.4f}")
+                st.write(f"- Output cost: ${output_cost:.4f}")
+                st.write(f"- **Total per case: ${extraction_cost_per_case:.4f}**")
+        
+        with tab4:
             st.subheader("🎯 Available Actions")
             
             col1, col2, col3 = st.columns(3)
@@ -1487,9 +1604,7 @@ def show():
     # Show sidebar navigation
     show_sidebar_navigation()
     
-    # Main content area
-    st.title("🧪 Legal Research Experimentation Platform")
-    
+    # Main content area - no redundant title since it's in sidebar
     # Get current page from session state
     current_page = st.session_state.get('selected_page', 'Cases')
     
