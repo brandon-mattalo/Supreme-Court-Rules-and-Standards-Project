@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import streamlit as st
 import json
 import sqlite3
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import tempfile
 
 load_dotenv()
@@ -64,7 +64,7 @@ def execute_sql(query, params=None, fetch=False):
     """Execute SQL query with proper connection handling"""
     if DB_TYPE == 'postgresql':
         with DB_ENGINE.connect() as conn:
-            result = conn.execute(query, params or ())
+            result = conn.execute(text(query), params or {})
             if fetch:
                 return result.fetchall()
             conn.commit()
