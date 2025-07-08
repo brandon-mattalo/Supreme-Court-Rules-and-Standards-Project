@@ -9,3 +9,5 @@ numpy
 choix
 statsmodels
 openpyxl
+psycopg2-binary
+sqlalchemy

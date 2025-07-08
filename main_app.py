@@ -7,7 +7,7 @@ import scipy.stats
 import scipy.optimize
 from scipy.stats import chi2
 import time
-from config import DB_NAME, get_gemini_model, GEMINI_MODELS, list_available_models, save_api_key, load_api_key, delete_api_key, DEFAULT_MODEL
+from config import get_database_connection, execute_sql, get_gemini_model, GEMINI_MODELS, list_available_models, save_api_key, load_api_key, delete_api_key, DEFAULT_MODEL
 from schemas import ExtractedLegalTest, LegalTestComparison
 import google.generativeai as genai
 import statsmodels.api as sm
@@ -695,11 +695,9 @@ def run_comparison(test1, test2):
     return response.text
 
 def setup_database():
-    """Creates the SQLite database and tables if they don't exist."""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    """Creates the database and tables if they don't exist."""
     
-    c.execute('''
+    execute_sql('''
         CREATE TABLE IF NOT EXISTS cases (
             case_id INTEGER PRIMARY KEY,
             case_name TEXT,
@@ -711,7 +709,7 @@ def setup_database():
         );
     ''')
     
-    c.execute('''
+    execute_sql('''
         CREATE TABLE IF NOT EXISTS legal_tests (
             test_id INTEGER PRIMARY KEY,
             case_id INTEGER,
@@ -726,7 +724,7 @@ def setup_database():
         );
     ''')
     
-    c.execute('''
+    execute_sql('''
         CREATE TABLE IF NOT EXISTS legal_test_comparisons (
             comparison_id INTEGER PRIMARY KEY,
             test_id_1 INTEGER,
@@ -742,9 +740,6 @@ def setup_database():
             UNIQUE(test_id_1, test_id_2)
         );
     ''')
-    
-    conn.commit()
-    conn.close()
 
 def load_data_from_parquet(uploaded_file):
     """Loads SCC cases from a Parquet file into the database, with robust duplicate handling and filtering by Excel citations."""
@@ -855,10 +850,14 @@ def load_data_from_parquet(uploaded_file):
     mapped_df.drop_duplicates(subset=['citation_normalized'], keep='first', inplace=True)
     st.info(f"After de-duplicating within Parquet data, {len(mapped_df)} rows remain (dropped {initial_dedupe_count - len(mapped_df)} internal duplicates).")
 
-    conn = sqlite3.connect(DB_NAME)
     try:
         # Step 2: Check against citations already in the database.
-        existing_citations_df = pd.read_sql("SELECT citation FROM cases", conn)
+        conn = get_database_connection()
+        try:
+            existing_citations_df = pd.read_sql("SELECT citation FROM cases", conn)
+        finally:
+            conn.close()
+            
         if not existing_citations_df.empty:
             existing_citations_normalized = set(existing_citations_df['citation'].astype(str).str.lower().str.strip())
             new_cases_df = mapped_df[~mapped_df['citation_normalized'].isin(existing_citations_normalized)]
@@ -872,14 +871,20 @@ def load_data_from_parquet(uploaded_file):
         else:
             db_columns = ['case_name', 'citation', 'decision_year', 'area_of_law', 'scc_url', 'full_text']
             new_cases_to_insert = new_cases_df[db_columns]
-            new_cases_to_insert.to_sql('cases', conn, if_exists='append', index=False)
-            st.success(f"Successfully loaded {len(new_cases_to_insert)} new SCC cases into the database.")
-    except sqlite3.IntegrityError:
-        st.error("An unexpected error occurred. It seems there was still a duplicate citation. Please check the source file for inconsistencies.")
+            
+            # Insert data using pandas to_sql with abstraction layer
+            conn = get_database_connection()
+            try:
+                new_cases_to_insert.to_sql('cases', conn, if_exists='append', index=False)
+                st.success(f"Successfully loaded {len(new_cases_to_insert)} new SCC cases into the database.")
+            finally:
+                conn.close()
+                
     except Exception as e:
-        st.error(f"An error occurred while loading data: {e}")
-    finally:
-        conn.close()
+        if "UNIQUE constraint failed" in str(e) or "IntegrityError" in str(e):
+            st.error("An unexpected error occurred. It seems there was still a duplicate citation. Please check the source file for inconsistencies.")
+        else:
+            st.error(f"An error occurred while loading data: {e}")
 
 if __name__ == "__main__":
     st.set_page_config(layout="wide")
@@ -984,12 +989,14 @@ if __name__ == "__main__":
     setup_database()
 
     # Calculate progress indicators
-    conn = sqlite3.connect(DB_NAME)
-    cases_count = pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0]
-    tests_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0]
-    comparisons_count = pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0]
-    validated_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0]
-    conn.close()
+    conn = get_database_connection()
+    try:
+        cases_count = pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0]
+        tests_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0]
+        comparisons_count = pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0]
+        validated_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0]
+    finally:
+        conn.close()
 
     # Section 1: Data Loading
     data_status = "✅ Complete" if cases_count > 0 else "📋 Pending"
@@ -1003,14 +1010,10 @@ if __name__ == "__main__":
         col_clear1, col_clear2 = st.columns(2)
         with col_clear1:
             if st.button("Clear Cases Database"):
-                conn = sqlite3.connect(DB_NAME)
-                c = conn.cursor()
                 # Clear tables in dependency order due to foreign key constraints
-                c.execute("DELETE FROM legal_test_comparisons")
-                c.execute("DELETE FROM legal_tests")
-                c.execute("DELETE FROM cases")
-                conn.commit()
-                conn.close()
+                execute_sql("DELETE FROM legal_test_comparisons")
+                execute_sql("DELETE FROM legal_tests")
+                execute_sql("DELETE FROM cases")
                 st.success("Cases, legal tests, and comparisons database cleared.")
                 # Clear relevant session state variables
                 if 'cases_to_sample' in st.session_state: del st.session_state.cases_to_sample
@@ -1019,13 +1022,9 @@ if __name__ == "__main__":
                 st.rerun()
         with col_clear2:
             if st.button("Clear Extracted Tests Database"):
-                conn = sqlite3.connect(DB_NAME)
-                c = conn.cursor()
                 # Clear comparisons first due to foreign key constraint
-                c.execute("DELETE FROM legal_test_comparisons")
-                c.execute("DELETE FROM legal_tests")
-                conn.commit()
-                conn.close()
+                execute_sql("DELETE FROM legal_test_comparisons")
+                execute_sql("DELETE FROM legal_tests")
                 st.success("Extracted tests and comparisons database cleared.")
                 # Clear relevant session state variables
                 if 'test_to_edit' in st.session_state: del st.session_state.test_to_edit
@@ -1053,9 +1052,11 @@ if __name__ == "__main__":
             num_cases_to_sample = st.number_input("Select N random cases to sample", min_value=1, value=5)
 
             if st.button("Start Session"):
-                conn = sqlite3.connect(DB_NAME)
-                cases_to_sample = pd.read_sql(f"SELECT * FROM cases ORDER BY RANDOM() LIMIT {num_cases_to_sample}", conn)
-                conn.close()
+                conn = get_database_connection()
+                try:
+                    cases_to_sample = pd.read_sql(f"SELECT * FROM cases ORDER BY RANDOM() LIMIT {num_cases_to_sample}", conn)
+                finally:
+                    conn.close()
                 st.session_state.cases_to_sample = cases_to_sample
                 st.rerun()
 
@@ -1064,9 +1065,11 @@ if __name__ == "__main__":
                 # Check for completed extractions to remove
                 cases_to_remove = []
                 for index, row in st.session_state.cases_to_sample.iterrows():
-                    conn = sqlite3.connect(DB_NAME)
-                    test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
-                    conn.close()
+                    conn = get_database_connection()
+                    try:
+                        test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
+                    finally:
+                        conn.close()
                     
                     if not test_info.empty:
                         # Case has been extracted, mark for removal
@@ -1095,9 +1098,11 @@ if __name__ == "__main__":
                     with st.container():
                         st.subheader(f"{row['case_name']} ({row['citation']})")
                         
-                        conn = sqlite3.connect(DB_NAME)
-                        test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
-                        conn.close()
+                        conn = get_database_connection()
+                        try:
+                            test_info = pd.read_sql(f"SELECT validation_status FROM legal_tests WHERE case_id = {row['case_id']}", conn)
+                        finally:
+                            conn.close()
 
                         if not test_info.empty:
                             # This case is extracted but not yet removed (showing success message)
@@ -1141,12 +1146,8 @@ if __name__ == "__main__":
                                             with st.spinner("Running extraction..."):
                                                 extracted_test_obj = run_extraction(row['full_text'])
                                                 
-                                                conn = sqlite3.connect(DB_NAME)
-                                                c = conn.cursor()
-                                                c.execute("INSERT INTO legal_tests (case_id, test_novelty, extracted_test_summary, source_paragraphs, source_type, validator_name) VALUES (?, ?, ?, ?, ?, ?)",
-                                                          (row['case_id'], extracted_test_obj.test_novelty, extracted_test_obj.extracted_test_summary, extracted_test_obj.source_paragraphs, 'ai_extracted', st.session_state.validator_name))
-                                                conn.commit()
-                                                conn.close()
+                                                execute_sql("INSERT INTO legal_tests (case_id, test_novelty, extracted_test_summary, source_paragraphs, source_type, validator_name) VALUES (?, ?, ?, ?, ?, ?)",
+                                                           (row['case_id'], extracted_test_obj.test_novelty, extracted_test_obj.extracted_test_summary, extracted_test_obj.source_paragraphs, 'ai_extracted', st.session_state.validator_name))
                                                 
                                                 st.session_state.confirming_extraction = None
                                                 st.rerun()  # This will trigger the removal logic
@@ -1171,22 +1172,24 @@ if __name__ == "__main__":
             # Pagination for overview table
             items_per_page = st.selectbox("Tests per page:", [5, 10, 20], index=1, key="overview_pagination")
             
-            conn = sqlite3.connect(DB_NAME)
-            overview_df = pd.read_sql("""
-                SELECT 
-                    c.decision_year,
-                    c.case_name,
-                    c.citation,
-                    c.scc_url,
-                    lt.test_novelty,
-                    lt.extracted_test_summary,
-                    lt.validation_status,
-                    lt.test_id
-                FROM cases c
-                JOIN legal_tests lt ON c.case_id = lt.case_id
-                ORDER BY c.decision_year DESC, c.case_name
-            """, conn)
-            conn.close()
+            conn = get_database_connection()
+            try:
+                overview_df = pd.read_sql("""
+                    SELECT 
+                        c.decision_year,
+                        c.case_name,
+                        c.citation,
+                        c.scc_url,
+                        lt.test_novelty,
+                        lt.extracted_test_summary,
+                        lt.validation_status,
+                        lt.test_id
+                    FROM cases c
+                    JOIN legal_tests lt ON c.case_id = lt.case_id
+                    ORDER BY c.decision_year DESC, c.case_name
+                """, conn)
+            finally:
+                conn.close()
             
             # Search functionality
             search_term = st.text_input("🔍 Search tests:", placeholder="Search by case name, citation, or test content...")
@@ -1272,14 +1275,16 @@ if __name__ == "__main__":
                             st.write(f"**Test Novelty:** {row['test_novelty']}")
                             
                             # Get additional details from database
-                            conn = sqlite3.connect(DB_NAME)
-                            full_details = pd.read_sql(f"""
-                                SELECT lt.*, c.area_of_law, c.full_text
-                                FROM legal_tests lt 
-                                JOIN cases c ON lt.case_id = c.case_id 
-                                WHERE lt.test_id = {row['test_id']}
-                            """, conn)
-                            conn.close()
+                            conn = get_database_connection()
+                            try:
+                                full_details = pd.read_sql(f"""
+                                    SELECT lt.*, c.area_of_law, c.full_text
+                                    FROM legal_tests lt 
+                                    JOIN cases c ON lt.case_id = c.case_id 
+                                    WHERE lt.test_id = {row['test_id']}
+                                """, conn)
+                            finally:
+                                conn.close()
                             
                             if not full_details.empty:
                                 detail = full_details.iloc[0]
@@ -1302,9 +1307,11 @@ if __name__ == "__main__":
                     st.divider()
 
     # Section 4: Human Validation
-    conn = sqlite3.connect(DB_NAME)
-    pending_tests = pd.read_sql("SELECT lt.*, c.case_name, c.scc_url FROM legal_tests lt JOIN cases c ON lt.case_id = c.case_id WHERE lt.validation_status = 'pending'", conn)
-    conn.close()
+    conn = get_database_connection()
+    try:
+        pending_tests = pd.read_sql("SELECT lt.*, c.case_name, c.scc_url FROM legal_tests lt JOIN cases c ON lt.case_id = c.case_id WHERE lt.validation_status = 'pending'", conn)
+    finally:
+        conn.close()
     
     validation_status = f"✅ {validated_count} validated" if validated_count > 0 else f"🔄 {len(pending_tests)} pending" if len(pending_tests) > 0 else "📋 No tests yet"
     with st.expander(f"🔍 **4. Human Validation** - {validation_status}", expanded=(len(pending_tests) > 0 and validated_count < 5)):
@@ -1358,9 +1365,7 @@ if __name__ == "__main__":
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             if st.button("💾 Save Changes", key=f"save_{row['test_id']}"):
-                                conn = sqlite3.connect(DB_NAME)
-                                c = conn.cursor()
-                                c.execute("""UPDATE legal_tests SET 
+                                execute_sql("""UPDATE legal_tests SET 
                                            test_novelty = ?, 
                                            extracted_test_summary = ?, 
                                            source_paragraphs = ?, 
@@ -1370,8 +1375,6 @@ if __name__ == "__main__":
                                            WHERE test_id = ?""", 
                                           (edited_novelty, edited_summary, edited_paragraphs, 
                                            st.session_state.validator_name, row['test_id']))
-                                conn.commit()
-                                conn.close()
                                 st.session_state.editing_test_id = None
                                 st.success(f"Test for {row['case_name']} updated and marked as accurate.")
                                 st.rerun()
@@ -1379,15 +1382,17 @@ if __name__ == "__main__":
                         with col2:
                             if st.button("🔄 Re-run AI", key=f"rerun_{row['test_id']}"):
                                 try:
-                                    conn = sqlite3.connect(DB_NAME)
-                                    case_data = pd.read_sql(f"SELECT full_text FROM cases WHERE case_id = {row['case_id']}", conn).iloc[0]
-                                    full_text = case_data['full_text']
+                                    conn = get_database_connection()
+                                    try:
+                                        case_data = pd.read_sql(f"SELECT full_text FROM cases WHERE case_id = {row['case_id']}", conn).iloc[0]
+                                        full_text = case_data['full_text']
+                                    finally:
+                                        conn.close()
                                     
                                     with st.spinner(f"Re-running extraction for {row['case_name']}..."):
                                         extracted_test_obj = run_extraction(full_text)
                                         
-                                        c = conn.cursor()
-                                        c.execute("""UPDATE legal_tests SET 
+                                        execute_sql("""UPDATE legal_tests SET 
                                                    test_novelty = ?, 
                                                    extracted_test_summary = ?, 
                                                    source_paragraphs = ?, 
@@ -1397,8 +1402,6 @@ if __name__ == "__main__":
                                                    WHERE test_id = ?""",
                                                   (extracted_test_obj.test_novelty, extracted_test_obj.extracted_test_summary, 
                                                    extracted_test_obj.source_paragraphs, st.session_state.validator_name, row['test_id']))
-                                        conn.commit()
-                                        conn.close()
                                     st.session_state.editing_test_id = None
                                     st.success(f"Re-extraction complete for {row['case_name']}!")
                                     st.rerun()
@@ -1426,12 +1429,8 @@ if __name__ == "__main__":
                         with col2:
                             st.write("**Actions:**")
                             if st.button("✅ Accurate", key=f"accurate_{row['test_id']}"):
-                                conn = sqlite3.connect(DB_NAME)
-                                c = conn.cursor()
-                                c.execute("UPDATE legal_tests SET validation_status = 'accurate', validator_name = ? WHERE test_id = ?", 
+                                execute_sql("UPDATE legal_tests SET validation_status = 'accurate', validator_name = ? WHERE test_id = ?", 
                                           (st.session_state.validator_name, row['test_id']))
-                                conn.commit()
-                                conn.close()
                                 st.success(f"Test marked as accurate.")
                                 st.rerun()
                             
@@ -1441,14 +1440,17 @@ if __name__ == "__main__":
 
     # Section 5: Pairwise Comparisons
     # Check for validated tests available for comparison
-    conn = sqlite3.connect(DB_NAME)
-    validated_tests = pd.read_sql("""
-        SELECT lt.*, c.case_name, c.citation, c.scc_url 
+    conn = get_database_connection()
+    try:
+        validated_tests = pd.read_sql("""
+            SELECT lt.*, c.case_name, c.citation, c.scc_url 
         FROM legal_tests lt 
         JOIN cases c ON lt.case_id = c.case_id 
         WHERE lt.validation_status = 'accurate'
         ORDER BY c.decision_year DESC
     """, conn)
+    finally:
+        conn.close()
     
     comparison_status = f"✅ {comparisons_count} completed" if comparisons_count > 0 else f"🔄 Ready for comparison" if len(validated_tests) >= 2 else f"📋 Need {2 - len(validated_tests)} more validated tests"
     with st.expander(f"⚖️ **5. Pairwise Comparisons** - {comparison_status}", expanded=(len(validated_tests) >= 2 and comparisons_count < 10)):
@@ -1461,7 +1463,9 @@ if __name__ == "__main__":
             st.write(f"**{len(validated_tests)} validated tests available for comparison**")
             
             # Show comparison progress
-            existing_comparisons = pd.read_sql("SELECT COUNT(*) as count FROM legal_test_comparisons", conn).iloc[0]['count']
+            conn = get_database_connection()
+            try:
+                existing_comparisons = pd.read_sql("SELECT COUNT(*) as count FROM legal_test_comparisons", conn).iloc[0]['count']
             total_possible = len(validated_tests) * (len(validated_tests) - 1) // 2
             st.metric("Comparisons Completed", f"{existing_comparisons}/{total_possible}")
             
@@ -1525,8 +1529,7 @@ if __name__ == "__main__":
                         col_save, col_cancel = st.columns(2)
                         with col_save:
                             if st.button("Save Comparison") and reasoning.strip():
-                                c = conn.cursor()
-                                c.execute("""INSERT INTO legal_test_comparisons 
+                                execute_sql("""INSERT INTO legal_test_comparisons 
                                            (test_id_1, test_id_2, more_rule_like_test_id, reasoning, comparator_name, comparison_method)
                                            VALUES (?, ?, ?, ?, ?, ?)""",
                                           (min(test1['test_id'], test2['test_id']), 
@@ -1535,7 +1538,6 @@ if __name__ == "__main__":
                                            reasoning, 
                                            st.session_state.get('validator_name', 'Unknown'), 
                                            'human'))
-                                conn.commit()
                                 st.success("Comparison saved!")
                                 # Clear session state
                                 del st.session_state.comparison_winner
@@ -1609,12 +1611,10 @@ if __name__ == "__main__":
                                 # Create consistent reasoning that shows the mapping
                                 reasoning_with_mapping = f"AI Comparison: Test A = {test1['case_name']}, Test B = {test2['case_name']}. {comparison_data.reasoning}"
                                 
-                                c = conn.cursor()
-                                c.execute("""INSERT INTO legal_test_comparisons 
+                                execute_sql("""INSERT INTO legal_test_comparisons 
                                            (test_id_1, test_id_2, more_rule_like_test_id, reasoning, comparator_name, comparison_method)
                                            VALUES (?, ?, ?, ?, ?, ?)""",
                                           (test_id_1, test_id_2, winner_id, reasoning_with_mapping, 'AI', 'ai_generated'))
-                                conn.commit()
                                 
                                 progress_bar.progress((idx + 1) / len(remaining_pairs))
                             except Exception as e:
@@ -1631,22 +1631,24 @@ if __name__ == "__main__":
                 st.write("This section helps diagnose and fix AI comparison mapping issues.")
                 
                 if st.button("Check AI Comparison Consistency"):
-                    conn = sqlite3.connect(DB_NAME)
-                    ai_comparisons = pd.read_sql("""
-                        SELECT ltc.*, 
-                               c1.case_name as case1_name, c2.case_name as case2_name,
-                               winner_c.case_name as winner_name
-                        FROM legal_test_comparisons ltc
-                        JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
-                        JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
-                        JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
-                        JOIN cases c1 ON lt1.case_id = c1.case_id
-                        JOIN cases c2 ON lt2.case_id = c2.case_id
-                        JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
-                        WHERE ltc.comparison_method = 'ai_generated'
+                    conn = get_database_connection()
+                    try:
+                        ai_comparisons = pd.read_sql("""
+                            SELECT ltc.*, 
+                                   c1.case_name as case1_name, c2.case_name as case2_name,
+                                   winner_c.case_name as winner_name
+                            FROM legal_test_comparisons ltc
+                            JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
+                            JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
+                            JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
+                            JOIN cases c1 ON lt1.case_id = c1.case_id
+                            JOIN cases c2 ON lt2.case_id = c2.case_id
+                            JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
+                            WHERE ltc.comparison_method = 'ai_generated'
                         AND ltc.reasoning NOT LIKE 'AI Comparison: Test A =%'
                     """, conn)
-                    conn.close()
+                    finally:
+                        conn.close()
                     
                     if not ai_comparisons.empty:
                         st.warning(f"Found {len(ai_comparisons)} AI comparisons that may have mapping issues:")
@@ -1665,25 +1667,28 @@ if __name__ == "__main__":
                     st.info("No comparisons completed yet. Complete some comparisons above to see them here.")
                 else:
                     # Get all completed comparisons with case details - open new connection
-                    conn = sqlite3.connect(DB_NAME)
-                    completed_comparisons = pd.read_sql("""
-                        SELECT 
-                            ltc.*,
-                            c1.case_name as case1_name, c1.citation as case1_citation, c1.decision_year as case1_year,
-                            c2.case_name as case2_name, c2.citation as case2_citation, c2.decision_year as case2_year,
-                            lt1.extracted_test_summary as test1_summary,
-                            lt2.extracted_test_summary as test2_summary,
-                            winner_c.case_name as winner_name,
-                            winner_lt.extracted_test_summary as winner_summary
-                        FROM legal_test_comparisons ltc
-                        JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
-                        JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
-                        JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
+                    conn = get_database_connection()
+                    try:
+                        completed_comparisons = pd.read_sql("""
+                            SELECT 
+                                ltc.*,
+                                c1.case_name as case1_name, c1.citation as case1_citation, c1.decision_year as case1_year,
+                                c2.case_name as case2_name, c2.citation as case2_citation, c2.decision_year as case2_year,
+                                lt1.extracted_test_summary as test1_summary,
+                                lt2.extracted_test_summary as test2_summary,
+                                winner_c.case_name as winner_name,
+                                winner_lt.extracted_test_summary as winner_summary
+                            FROM legal_test_comparisons ltc
+                            JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
+                            JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
+                            JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
                         JOIN cases c1 ON lt1.case_id = c1.case_id
                         JOIN cases c2 ON lt2.case_id = c2.case_id
                         JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
                         ORDER BY ltc.timestamp DESC
                     """, conn)
+                    finally:
+                        conn.close()
                     
                     if not completed_comparisons.empty:
                         st.write(f"**{len(completed_comparisons)} completed comparisons:**")
@@ -1814,10 +1819,8 @@ if __name__ == "__main__":
                                 with col_val1:
                                     if st.button("✅ Approve", key=f"approve_{comp['comparison_id']}"):
                                         # Mark as human validated (could add a validation_status column)
-                                        c = conn.cursor()
-                                        c.execute("UPDATE legal_test_comparisons SET comparator_name = ? WHERE comparison_id = ?", 
+                                        execute_sql("UPDATE legal_test_comparisons SET comparator_name = ? WHERE comparison_id = ?", 
                                                  (f"{comp['comparator_name']} (Validated)", comp['comparison_id']))
-                                        conn.commit()
                                         st.success("Comparison approved!")
                                         st.rerun()
                                 
@@ -1828,9 +1831,7 @@ if __name__ == "__main__":
                                 
                                 with col_val3:
                                     if st.button("🗑️ Delete", key=f"delete_{comp['comparison_id']}"):
-                                        c = conn.cursor()
-                                        c.execute("DELETE FROM legal_test_comparisons WHERE comparison_id = ?", (comp['comparison_id'],))
-                                        conn.commit()
+                                        execute_sql("DELETE FROM legal_test_comparisons WHERE comparison_id = ?", (comp['comparison_id'],))
                                         st.success("Comparison deleted!")
                                         st.rerun()
                                 
@@ -1847,13 +1848,11 @@ if __name__ == "__main__":
                                     col_override1, col_override2 = st.columns(2)
                                     with col_override1:
                                         if st.button(f"Make {other_test_name} Winner", key=f"flip_{comp['comparison_id']}") and new_reasoning.strip():
-                                            c = conn.cursor()
-                                            c.execute("""UPDATE legal_test_comparisons 
+                                            execute_sql("""UPDATE legal_test_comparisons 
                                                        SET more_rule_like_test_id = ?, reasoning = ?, 
                                                            comparator_name = ?, comparison_method = 'human_override' 
                                                        WHERE comparison_id = ?""", 
                                                      (other_test_id, new_reasoning, st.session_state.get('validator_name', 'Human'), comp['comparison_id']))
-                                            conn.commit()
                                             del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
                                             st.success("Comparison updated!")
                                             st.rerun()
@@ -1862,7 +1861,7 @@ if __name__ == "__main__":
                                         if st.button("Cancel Override", key=f"cancel_{comp['comparison_id']}"):
                                             del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
                                         st.rerun()
-                
+            finally:
                 conn.close()
 
     # Section 6: Analysis
@@ -1926,30 +1925,30 @@ if __name__ == "__main__":
             if not can_user_proceed():
                 show_name_required_error()
             
-            conn = sqlite3.connect(DB_NAME)
-            
-            # Get validated tests and their comparisons
-            validated_tests = pd.read_sql("""
-                SELECT lt.*, c.case_name, c.citation, c.decision_year
-                FROM legal_tests lt 
-                JOIN cases c ON lt.case_id = c.case_id 
-                WHERE lt.validation_status = 'accurate'
-                ORDER BY lt.test_id
-            """, conn)
-            
-            comparisons = pd.read_sql("""
-                SELECT test_id_1, test_id_2, more_rule_like_test_id 
+            conn = get_database_connection()
+            try:
+                # Get validated tests and their comparisons
+                validated_tests = pd.read_sql("""
+                    SELECT lt.*, c.case_name, c.citation, c.decision_year
+                    FROM legal_tests lt 
+                    JOIN cases c ON lt.case_id = c.case_id 
+                    WHERE lt.validation_status = 'accurate'
+                    ORDER BY lt.test_id
+                """, conn)
+                
+                comparisons = pd.read_sql("""
+                    SELECT test_id_1, test_id_2, more_rule_like_test_id 
                 FROM legal_test_comparisons
             """, conn)
+            finally:
+                conn.close()
             
             if len(validated_tests) < 2:
                 st.error("Need at least 2 validated legal tests to run analysis.")
-                conn.close()
                 st.stop()
                 
             if len(comparisons) == 0:
                 st.error("No pairwise comparisons found. Please complete some comparisons first.")
-                conn.close()
                 st.stop()
             
             try:
@@ -1974,7 +1973,6 @@ if __name__ == "__main__":
                 
                 if len(comparison_data) == 0:
                     st.error("No valid comparisons found between validated tests.")
-                    conn.close()
                     st.stop()
                 
                 n_items = len(validated_tests)
@@ -2188,12 +2186,10 @@ if __name__ == "__main__":
                     st.error("No tests could be analyzed. This suggests a fundamental issue with the comparison data.")
                 
                 # Update bt_scores in database (only for non-NaN values)
-                c = conn.cursor()
                 for _, row in results_df.iterrows():
                     if pd.notna(row['bt_score']):
-                        c.execute("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
+                        execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
                                  (row['bt_score'], row['test_id']))
-                conn.commit()
                 
                 # Store analysis results in session state
                 st.session_state.analysis_results = {
@@ -2267,5 +2263,3 @@ if __name__ == "__main__":
                             for tid, idx in test_id_to_idx.items()
                         ])
                         st.dataframe(mapping_df, use_container_width=True)
-
-        conn.close()
