@@ -7,20 +7,18 @@ import streamlit as st
 import pandas as pd
 from config import execute_sql, get_database_connection
 
-def get_active_experiment():
-    """Get the currently active experiment configuration"""
-    if 'active_experiment' not in st.session_state:
-        return None
-    
-    exp_id = st.session_state.active_experiment
+# Cache active experiment for 60 seconds
+@st.cache_data(ttl=60)
+def _get_active_experiment_data(exp_id):
+    """Get experiment data from database"""
     exp_data = execute_sql(
-        "SELECT * FROM experiments WHERE experiment_id = ?", 
+        "SELECT * FROM v2_experiments WHERE experiment_id = ?", 
         (exp_id,), 
         fetch=True
     )
     
     if exp_data:
-        columns = ['experiment_id', 'name', 'description', 'status', 'ai_model', 
+        columns = ['experiment_id', 'name', 'description', 'researcher_name', 'status', 'ai_model', 
                    'temperature', 'top_p', 'top_k', 'max_output_tokens', 
                    'extraction_strategy', 'extraction_prompt', 'comparison_prompt',
                    'system_instruction', 'cost_limit_usd', 'created_date',
@@ -28,6 +26,14 @@ def get_active_experiment():
         return dict(zip(columns, exp_data[0]))
     
     return None
+
+def get_active_experiment():
+    """Get the currently active experiment configuration"""
+    if 'active_experiment' not in st.session_state:
+        return None
+    
+    exp_id = st.session_state.active_experiment
+    return _get_active_experiment_data(exp_id)
 
 def show_experiment_context():
     """Show current experiment context and quick switching"""
@@ -62,17 +68,23 @@ def show_experiment_context():
     st.divider()
     return True
 
+# Cache available experiments for 60 seconds
+@st.cache_data(ttl=60)
+def _get_available_experiments():
+    """Get available experiments from database"""
+    return execute_sql("""
+        SELECT experiment_id, name, description, status, ai_model 
+        FROM v2_experiments 
+        WHERE status IN ('draft', 'active')
+        ORDER BY modified_date DESC
+    """, fetch=True)
+
 def show_experiment_selection():
     """Show experiment selection interface"""
     st.header("🧪 Select Experiment to Execute")
     
     # Get available experiments
-    experiments = execute_sql("""
-        SELECT experiment_id, name, description, status, ai_model 
-        FROM experiments 
-        WHERE status IN ('draft', 'active')
-        ORDER BY modified_date DESC
-    """, fetch=True)
+    experiments = _get_available_experiments()
     
     if not experiments:
         st.warning("No experiments available for execution.")
@@ -169,7 +181,7 @@ def show_progress_tracking():
     
     # Get latest run data
     run_data = execute_sql("""
-        SELECT * FROM experiment_runs 
+        SELECT * FROM v2_experiment_runs 
         WHERE experiment_id = ? 
         ORDER BY run_date DESC 
         LIMIT 1

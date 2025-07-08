@@ -24,21 +24,29 @@ except:
 if not DATABASE_URL:
     DATABASE_URL = os.getenv('DATABASE_URL')
 
+# Cache for database connection
+@st.cache_resource
+def get_database_engine():
+    """Get cached database engine"""
+    if DATABASE_URL:
+        return create_engine(
+            DATABASE_URL,
+            pool_size=10,          # Maximum number of permanent connections to keep
+            max_overflow=20,       # Maximum number of connections that can overflow the pool
+            pool_pre_ping=True,    # Validate connections before use
+            pool_recycle=3600,     # Recycle connections after 1 hour
+            echo=False             # Set to True for SQL debugging
+        )
+    return None
+
 if DATABASE_URL:
     # Production: Use PostgreSQL (Neon) with connection pooling
-    DB_ENGINE = create_engine(
-        DATABASE_URL,
-        pool_size=10,          # Maximum number of permanent connections to keep
-        max_overflow=20,       # Maximum number of connections that can overflow the pool
-        pool_pre_ping=True,    # Validate connections before use
-        pool_recycle=3600,     # Recycle connections after 1 hour
-        echo=False             # Set to True for SQL debugging
-    )
+    DB_ENGINE = get_database_engine()
     DB_TYPE = 'postgresql'
     DB_NAME = None  # Will use engine for connections
 else:
-    # Local development: Use SQLite
-    DB_NAME = os.path.join(os.path.dirname(__file__), "parquet", "scc_cases.db")
+    # Local development: Use SQLite (v2.0 database)
+    DB_NAME = os.path.join(os.path.dirname(__file__), "parquet", "scc_cases_v2.db")
     DB_ENGINE = None
     DB_TYPE = 'sqlite'
 
@@ -50,16 +58,17 @@ else:
     # Local development: Use local file
     API_KEY_FILE = os.path.join(os.path.dirname(__file__), ".api_key.json")
 
-# Updated pricing for current Gemini models (2025)
+# Updated pricing for current Gemini models (2025) - per million tokens
 GEMINI_MODELS = {
     'gemini-2.5-pro': {'input': 1.25, 'output': 10.0, 'input_high_volume': 2.5, 'output_high_volume': 15.0},
-    'gemini-2.5-flash': {'input': 0.10, 'output': 0.40},
+    'gemini-2.5-flash': {'input': 0.30, 'output': 2.50},  # Corrected based on AI Studio pricing
     'gemini-2.5-flash-lite': {'input': 0.075, 'output': 0.30},
     'gemini-1.5-pro-latest': {'input': 1.25, 'output': 5.0},
 }
 
 DEFAULT_MODEL = 'gemini-2.5-pro'
 
+@st.cache_resource
 def get_database_connection():
     """Get database connection based on environment (SQLite or PostgreSQL)"""
     if DB_TYPE == 'postgresql':
@@ -215,7 +224,7 @@ def get_gemini_model(model_name: str, api_key: str = None):
     generation_config = {
         "temperature": 0,
         "top_p": 1,
-        "top_k": 1,
+        "top_k": 40,
         "max_output_tokens": 8192,
     }
 

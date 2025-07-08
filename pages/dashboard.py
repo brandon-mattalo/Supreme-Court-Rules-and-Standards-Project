@@ -11,77 +11,284 @@ from config import GEMINI_MODELS, execute_sql, get_database_connection
 import json
 from utils.case_management import (
     get_database_counts, load_data_from_parquet, clear_database, 
-    get_case_summary, get_available_cases, filter_cases_by_criteria
+    get_case_summary, get_available_cases, filter_cases_by_criteria,
+    get_experiment_selected_cases, get_available_cases_for_selection,
+    add_cases_to_experiments, remove_cases_from_experiments,
+    calculate_bradley_terry_comparisons
 )
 
 def initialize_experiment_tables():
     """Initialize database tables for experiment management"""
     
-    # Experiments table
-    execute_sql('''
-        CREATE TABLE IF NOT EXISTS experiments (
-            experiment_id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            description TEXT,
-            status TEXT DEFAULT 'draft',
-            ai_model TEXT DEFAULT 'gemini-2.5-pro',
-            temperature REAL DEFAULT 0.0,
-            top_p REAL DEFAULT 1.0,
-            top_k INTEGER DEFAULT 1,
-            max_output_tokens INTEGER DEFAULT 8192,
-            extraction_strategy TEXT DEFAULT 'single_test',
-            extraction_prompt TEXT,
-            comparison_prompt TEXT,
-            system_instruction TEXT,
-            cost_limit_usd REAL DEFAULT 100.0,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            modified_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT DEFAULT 'researcher'
-        );
-    ''')
+    # Cases table (v2) - Just store the cases and metadata
+    from config import DB_TYPE
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_cases (
+                case_id SERIAL PRIMARY KEY,
+                case_name TEXT NOT NULL,
+                citation TEXT UNIQUE NOT NULL,
+                decision_year INTEGER,
+                area_of_law TEXT,
+                subject TEXT,
+                decision_url TEXT,
+                case_text TEXT,
+                case_length INTEGER,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_cases (
+                case_id INTEGER PRIMARY KEY,
+                case_name TEXT NOT NULL,
+                citation TEXT UNIQUE NOT NULL,
+                decision_year INTEGER,
+                area_of_law TEXT,
+                subject TEXT,
+                decision_url TEXT,
+                case_text TEXT,
+                case_length INTEGER,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
     
-    # Experiment runs table
-    execute_sql('''
-        CREATE TABLE IF NOT EXISTS experiment_runs (
-            run_id INTEGER PRIMARY KEY,
-            experiment_id INTEGER,
-            run_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending',
-            cases_processed INTEGER DEFAULT 0,
-            tests_extracted INTEGER DEFAULT 0,
-            comparisons_completed INTEGER DEFAULT 0,
-            total_cost_usd REAL DEFAULT 0.0,
-            execution_time_minutes REAL DEFAULT 0.0,
-            error_message TEXT,
-            FOREIGN KEY (experiment_id) REFERENCES experiments (experiment_id)
-        );
-    ''')
+    # Experiments table (v2)
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiments (
+                experiment_id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                researcher_name TEXT DEFAULT '',
+                status TEXT DEFAULT 'draft',
+                ai_model TEXT DEFAULT 'gemini-2.5-pro',
+                temperature REAL DEFAULT 0.0,
+                top_p REAL DEFAULT 1.0,
+                top_k INTEGER DEFAULT 40,
+                max_output_tokens INTEGER DEFAULT 8192,
+                extraction_strategy TEXT DEFAULT 'single_test',
+                extraction_prompt TEXT,
+                comparison_prompt TEXT,
+                system_instruction TEXT,
+                cost_limit_usd REAL DEFAULT 100.0,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                modified_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT DEFAULT 'researcher'
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiments (
+                experiment_id INTEGER PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                researcher_name TEXT DEFAULT '',
+                status TEXT DEFAULT 'draft',
+                ai_model TEXT DEFAULT 'gemini-2.5-pro',
+                temperature REAL DEFAULT 0.0,
+                top_p REAL DEFAULT 1.0,
+                top_k INTEGER DEFAULT 40,
+                max_output_tokens INTEGER DEFAULT 8192,
+                extraction_strategy TEXT DEFAULT 'single_test',
+                extraction_prompt TEXT,
+                comparison_prompt TEXT,
+                system_instruction TEXT,
+                cost_limit_usd REAL DEFAULT 100.0,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                modified_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT DEFAULT 'researcher'
+            );
+        ''')
     
-    # Experiment results summary table
-    execute_sql('''
-        CREATE TABLE IF NOT EXISTS experiment_results (
-            result_id INTEGER PRIMARY KEY,
-            experiment_id INTEGER,
-            metric_type TEXT,
-            metric_value REAL,
-            bt_statistics_json TEXT,
-            regression_results_json TEXT,
-            confidence_scores_json TEXT,
-            calculated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (experiment_id) REFERENCES experiments (experiment_id)
-        );
-    ''')
+    # Experiment runs table (v2)
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_runs (
+                run_id SERIAL PRIMARY KEY,
+                experiment_id INTEGER,
+                run_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending',
+                cases_processed INTEGER DEFAULT 0,
+                tests_extracted INTEGER DEFAULT 0,
+                comparisons_completed INTEGER DEFAULT 0,
+                total_cost_usd REAL DEFAULT 0.0,
+                execution_time_minutes REAL DEFAULT 0.0,
+                error_message TEXT,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_runs (
+                run_id INTEGER PRIMARY KEY,
+                experiment_id INTEGER,
+                run_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending',
+                cases_processed INTEGER DEFAULT 0,
+                tests_extracted INTEGER DEFAULT 0,
+                comparisons_completed INTEGER DEFAULT 0,
+                total_cost_usd REAL DEFAULT 0.0,
+                execution_time_minutes REAL DEFAULT 0.0,
+                error_message TEXT,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id)
+            );
+        ''')
     
-    # Add indexes for performance
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments (status);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_experiment_runs_experiment_id ON experiment_runs (experiment_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_experiment_results_experiment_id ON experiment_results (experiment_id);')
+    # Experiment extractions table (v2) - Store extractions per experiment
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_extractions (
+                extraction_id SERIAL PRIMARY KEY,
+                experiment_id INTEGER,
+                case_id INTEGER,
+                legal_test_name TEXT,
+                legal_test_content TEXT,
+                extraction_rationale TEXT,
+                rule_like_score REAL,
+                confidence_score REAL,
+                validation_status TEXT DEFAULT 'pending',
+                validator_notes TEXT,
+                api_cost_usd REAL DEFAULT 0.0,
+                extraction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(experiment_id, case_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_extractions (
+                extraction_id INTEGER PRIMARY KEY,
+                experiment_id INTEGER,
+                case_id INTEGER,
+                legal_test_name TEXT,
+                legal_test_content TEXT,
+                extraction_rationale TEXT,
+                rule_like_score REAL,
+                confidence_score REAL,
+                validation_status TEXT DEFAULT 'pending',
+                validator_notes TEXT,
+                api_cost_usd REAL DEFAULT 0.0,
+                extraction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(experiment_id, case_id)
+            );
+        ''')
+    
+    # Experiment comparisons table (v2) - Store pairwise comparisons per experiment
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_comparisons (
+                comparison_id SERIAL PRIMARY KEY,
+                experiment_id INTEGER,
+                extraction_id_1 INTEGER,
+                extraction_id_2 INTEGER,
+                winner_id INTEGER,
+                comparison_rationale TEXT,
+                confidence_score REAL,
+                human_validated BOOLEAN DEFAULT FALSE,
+                api_cost_usd REAL DEFAULT 0.0,
+                comparison_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                FOREIGN KEY (extraction_id_1) REFERENCES v2_experiment_extractions (extraction_id),
+                FOREIGN KEY (extraction_id_2) REFERENCES v2_experiment_extractions (extraction_id),
+                FOREIGN KEY (winner_id) REFERENCES v2_experiment_extractions (extraction_id),
+                UNIQUE(experiment_id, extraction_id_1, extraction_id_2)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_comparisons (
+                comparison_id INTEGER PRIMARY KEY,
+                experiment_id INTEGER,
+                extraction_id_1 INTEGER,
+                extraction_id_2 INTEGER,
+                winner_id INTEGER,
+                comparison_rationale TEXT,
+                confidence_score REAL,
+                human_validated BOOLEAN DEFAULT FALSE,
+                api_cost_usd REAL DEFAULT 0.0,
+                comparison_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                FOREIGN KEY (extraction_id_1) REFERENCES v2_experiment_extractions (extraction_id),
+                FOREIGN KEY (extraction_id_2) REFERENCES v2_experiment_extractions (extraction_id),
+                FOREIGN KEY (winner_id) REFERENCES v2_experiment_extractions (extraction_id),
+                UNIQUE(experiment_id, extraction_id_1, extraction_id_2)
+            );
+        ''')
+    
+    # Experiment results summary table (v2)
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_results (
+                result_id SERIAL PRIMARY KEY,
+                experiment_id INTEGER,
+                metric_type TEXT,
+                metric_value REAL,
+                bt_statistics_json TEXT,
+                regression_results_json TEXT,
+                confidence_scores_json TEXT,
+                calculated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_results (
+                result_id INTEGER PRIMARY KEY,
+                experiment_id INTEGER,
+                metric_type TEXT,
+                metric_value REAL,
+                bt_statistics_json TEXT,
+                regression_results_json TEXT,
+                confidence_scores_json TEXT,
+                calculated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id)
+            );
+        ''')
+    
+    # Experiment selected cases table (v2) - Cases chosen for experiments
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_selected_cases (
+                selection_id SERIAL PRIMARY KEY,
+                case_id INTEGER,
+                selected_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                selected_by TEXT DEFAULT 'researcher',
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(case_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_experiment_selected_cases (
+                selection_id INTEGER PRIMARY KEY,
+                case_id INTEGER,
+                selected_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                selected_by TEXT DEFAULT 'researcher',
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(case_id)
+            );
+        ''')
+    
+    # Add indexes for performance (v2)
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_citation ON v2_cases (citation);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_year ON v2_cases (decision_year);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_status ON v2_experiments (status);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_experiment_id ON v2_experiment_runs (experiment_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_experiment_id ON v2_experiment_extractions (experiment_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_case_id ON v2_experiment_extractions (case_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_experiment_id ON v2_experiment_comparisons (experiment_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_results_experiment_id ON v2_experiment_results (experiment_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_selected_cases_case_id ON v2_experiment_selected_cases (case_id);')
 
 def show_experiment_overview():
     """Display overview of all experiments"""
     st.header("📊 Experiment Overview")
     
-    # Get experiment data
+    # Get experiment data (v2)
     experiments_data = execute_sql("""
         SELECT 
             e.*,
@@ -90,8 +297,8 @@ def show_experiment_overview():
             SUM(er.total_cost_usd) as total_cost,
             SUM(er.tests_extracted) as total_tests,
             SUM(er.comparisons_completed) as total_comparisons
-        FROM experiments e
-        LEFT JOIN experiment_runs er ON e.experiment_id = er.experiment_id
+        FROM v2_experiments e
+        LEFT JOIN v2_experiment_runs er ON e.experiment_id = er.experiment_id
         GROUP BY e.experiment_id
         ORDER BY e.modified_date DESC
     """, fetch=True)
@@ -101,7 +308,7 @@ def show_experiment_overview():
         return
     
     # Convert to DataFrame
-    columns = ['experiment_id', 'name', 'description', 'status', 'ai_model', 'temperature', 
+    columns = ['experiment_id', 'name', 'description', 'researcher_name', 'status', 'ai_model', 'temperature', 
                'top_p', 'top_k', 'max_output_tokens', 'extraction_strategy', 'extraction_prompt',
                'comparison_prompt', 'system_instruction', 'cost_limit_usd', 'created_date',
                'modified_date', 'created_by', 'total_runs', 'last_run_date', 'total_cost',
@@ -109,43 +316,144 @@ def show_experiment_overview():
     
     df = pd.DataFrame(experiments_data, columns=columns)
     
-    # Display experiment cards
-    for _, exp in df.iterrows():
-        with st.container():
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-            
-            with col1:
-                st.subheader(f"🧪 {exp['name']}")
-                st.write(f"**Description:** {exp['description'] or 'No description'}")
-                st.write(f"**Model:** {exp['ai_model']} (temp: {exp['temperature']})")
-                st.write(f"**Strategy:** {exp['extraction_strategy']}")
-            
-            with col2:
-                # Status badge
-                status_colors = {
-                    'draft': '🟡 Draft',
-                    'active': '🟢 Active', 
-                    'completed': '🔵 Completed',
-                    'archived': '⚫ Archived'
-                }
-                st.metric("Status", status_colors.get(exp['status'], exp['status']))
-                st.metric("Total Runs", int(exp['total_runs'] or 0))
-            
-            with col3:
-                st.metric("Tests Extracted", int(exp['total_tests'] or 0))
-                st.metric("Comparisons", int(exp['total_comparisons'] or 0))
-            
-            with col4:
-                st.metric("Total Cost", f"${exp['total_cost'] or 0:.2f}")
-                if st.button("⚙️ Configure", key=f"config_{exp['experiment_id']}"):
-                    st.session_state.editing_experiment = exp['experiment_id']
-                    st.rerun()
-                if st.button("▶️ Execute", key=f"execute_{exp['experiment_id']}"):
-                    st.session_state.active_experiment = exp['experiment_id']
-                    st.session_state.page_navigation = "⚗️ Experiment Execution"
-                    st.rerun()
+    # Get selected cases count and actual case length data for accurate calculations
+    try:
+        selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
+        total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
         
-        st.divider()
+        # Get real case length statistics
+        if selected_cases_count > 0:
+            # Average length of selected cases
+            selected_lengths = execute_sql("""
+                SELECT AVG(c.case_length) 
+                FROM v2_cases c 
+                JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
+                WHERE c.case_length IS NOT NULL
+            """, fetch=True)
+            avg_selected_case_length = float(selected_lengths[0][0]) if selected_lengths and selected_lengths[0][0] else 52646.0
+        else:
+            avg_selected_case_length = 52646.0  # Overall average from database
+            
+        # Average length across all cases for full database estimates
+        all_lengths = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
+        avg_all_case_length = float(all_lengths[0][0]) if all_lengths and all_lengths[0][0] else 52646.0
+        
+    except Exception as e:
+        selected_cases_count = 0
+        total_cases_count = 0
+        avg_selected_case_length = 52646.0
+        avg_all_case_length = 52646.0
+    
+    # Calculate shared parameters once
+    n_cases = selected_cases_count
+    required_comparisons = calculate_bradley_terry_comparisons(n_cases)
+    
+    # Bradley-Terry parameters for display
+    block_size = 15  # 12 core + 3 bridge cases per block
+    core_cases_per_block = 12
+    comparisons_per_block = 105
+    
+    # Skip if no cases selected
+    if n_cases == 0:
+        st.info("No cases selected for experiments yet. Select cases first to see experiment details.")
+        return
+    
+    # Display experiment cards in responsive grid
+    st.write(f"**{len(df)} experiments found**")
+    st.write("")
+    
+    # Create responsive columns for card layout (3 cards per row on wide screens)
+    num_cols = 3
+    rows = [df.iloc[i:i+num_cols] for i in range(0, len(df), num_cols)]
+    
+    for row in rows:
+        cols = st.columns(num_cols)
+        
+        for idx, (_, exp) in enumerate(row.iterrows()):
+            if idx < len(cols):  # Safety check
+                with cols[idx]:
+                    show_experiment_card(exp, n_cases, required_comparisons, 
+                                        avg_selected_case_length, avg_all_case_length, 
+                                        total_cases_count, block_size, core_cases_per_block, 
+                                        comparisons_per_block)
+
+def show_experiment_card(exp, n_cases, required_comparisons, avg_selected_case_length, 
+                        avg_all_case_length, total_cases_count, block_size, 
+                        core_cases_per_block, comparisons_per_block):
+    """Display a single experiment card"""
+            
+    # Get model pricing (prices are per million tokens)
+    model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
+    
+    # Calculate accurate costs based on real case lengths
+    avg_tokens_selected = avg_selected_case_length / 4
+    
+    # Estimate costs (simplified for card display)
+    system_prompt_tokens = 100
+    extraction_prompt_tokens = 200
+    extracted_test_tokens = 325  # ~250 words * 1.3 tokens/word
+    
+    extraction_input_tokens = avg_tokens_selected + system_prompt_tokens + extraction_prompt_tokens
+    extraction_cost_per_case = (extraction_input_tokens / 1_000_000) * model_pricing['input'] + (extracted_test_tokens / 1_000_000) * model_pricing['output']
+    
+    # Calculate estimates
+    remaining_extractions = max(0, n_cases - int(exp['total_tests'] or 0))
+    remaining_comparisons = max(0, required_comparisons - int(exp['total_comparisons'] or 0))
+    
+    extraction_cost_estimate = remaining_extractions * extraction_cost_per_case
+    sample_total_cost = (n_cases * extraction_cost_per_case) + (required_comparisons * 0.0003)  # Rough comparison cost
+    
+    # Status and progress
+    status_colors = {
+        'draft': '🟡 Draft',
+        'active': '🟢 Active', 
+        'completed': '🔵 Completed',
+        'archived': '⚫ Archived'
+    }
+    
+    # Use Streamlit's built-in container with visual separation
+    with st.container(border=True):
+        # Card content
+        st.subheader(f"🧪 #{exp['experiment_id']} {exp['name']}")
+        st.markdown(f"**{status_colors.get(exp['status'], exp['status'])}**")
+        
+        # Key metrics in columns
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Tests", f"{int(exp['total_tests'] or 0)}/{n_cases}")
+            st.metric("Comparisons", f"{int(exp['total_comparisons'] or 0)}/{required_comparisons}")
+        
+        with col2:
+            st.metric("Spent", f"${exp['total_cost'] or 0:.2f}")
+            st.metric("Sample Est.", f"${sample_total_cost:.2f}")
+        
+        # Description (truncated)
+        description = exp['description'] or 'No description'
+        if len(description) > 60:
+            description = description[:60] + "..."
+        st.caption(f"**Model:** {exp['ai_model']} | **Strategy:** {exp['extraction_strategy']}")
+        st.caption(f"**Description:** {description}")
+        
+        # Actions
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("⚙️ Configure", key=f"config_{exp['experiment_id']}", use_container_width=True):
+                st.session_state.editing_experiment = exp['experiment_id']
+                st.rerun()
+        
+        with col2:
+            if st.button("▶️ Execute", key=f"execute_{exp['experiment_id']}", use_container_width=True):
+                st.session_state.active_experiment = exp['experiment_id']
+                st.session_state.page_navigation = "⚗️ Experiment Execution"
+                st.rerun()
+        
+        with col3:
+            if st.button("📊 Details", key=f"details_{exp['experiment_id']}", use_container_width=True):
+                st.session_state.selected_page = "Experiment Detail"
+                st.session_state.selected_experiment = exp['experiment_id']
+                st.rerun()
 
 def show_experiment_configuration():
     """Show experiment configuration interface"""
@@ -157,12 +465,12 @@ def show_experiment_configuration():
     if editing_id:
         # Load existing experiment
         exp_data = execute_sql(
-            "SELECT * FROM experiments WHERE experiment_id = ?", 
+            "SELECT * FROM v2_experiments WHERE experiment_id = ?", 
             (editing_id,), 
             fetch=True
         )
         if exp_data:
-            exp = dict(zip(['experiment_id', 'name', 'description', 'status', 'ai_model', 
+            exp = dict(zip(['experiment_id', 'name', 'description', 'researcher_name', 'status', 'ai_model', 
                            'temperature', 'top_p', 'top_k', 'max_output_tokens', 
                            'extraction_strategy', 'extraction_prompt', 'comparison_prompt',
                            'system_instruction', 'cost_limit_usd', 'created_date',
@@ -175,11 +483,12 @@ def show_experiment_configuration():
         exp = {
             'name': '',
             'description': '',
+            'researcher_name': '',
             'status': 'draft',
             'ai_model': 'gemini-2.5-pro',
             'temperature': 0.0,
             'top_p': 1.0,
-            'top_k': 1,
+            'top_k': 40,
             'max_output_tokens': 8192,
             'extraction_strategy': 'single_test',
             'extraction_prompt': '',
@@ -195,6 +504,7 @@ def show_experiment_configuration():
         
         with col1:
             name = st.text_input("Experiment Name", value=exp['name'])
+            researcher_name = st.text_input("Researcher's Name", value=exp['researcher_name'])
             status = st.selectbox("Status", ['draft', 'active', 'completed', 'archived'], 
                                 index=['draft', 'active', 'completed', 'archived'].index(exp['status']))
         
@@ -209,16 +519,42 @@ def show_experiment_configuration():
         with col1:
             ai_model = st.selectbox("AI Model", list(GEMINI_MODELS.keys()), 
                                   index=list(GEMINI_MODELS.keys()).index(exp['ai_model']))
-            temperature = st.slider("Temperature", 0.0, 2.0, float(exp['temperature']), step=0.1)
-            top_p = st.slider("Top P", 0.0, 1.0, float(exp['top_p']), step=0.1)
+            temperature = st.slider(
+                "Temperature", 
+                0.0, 2.0, 
+                float(exp['temperature']), 
+                step=0.1,
+                help="Controls response randomness. 0.0 = deterministic/consistent, 0.5-0.7 = balanced, 1.0+ = creative. Recommended: 0.0-0.3 for legal analysis."
+            )
+            top_p = st.slider(
+                "Top P", 
+                0.0, 1.0, 
+                float(exp['top_p']), 
+                step=0.1,
+                help="Nucleus sampling threshold. 0.1 = very focused, 0.9 = diverse vocabulary, 1.0 = no filtering. Recommended: 0.8-1.0 for comprehensive analysis."
+            )
         
         with col2:
-            top_k = st.number_input("Top K", min_value=1, value=int(exp['top_k']))
-            max_tokens = st.number_input("Max Output Tokens", min_value=1, max_value=16384, 
-                                       value=int(exp['max_output_tokens']))
-            extraction_strategy = st.selectbox("Extraction Strategy", 
-                                             ['single_test', 'multi_test', 'full_text_comparison'],
-                                             index=['single_test', 'multi_test', 'full_text_comparison'].index(exp['extraction_strategy']))
+            top_k = st.slider(
+                "Top K", 
+                1, 100, 
+                int(exp['top_k']), 
+                step=1,
+                help="Number of top tokens to consider. 1 = deterministic, 20-40 = balanced, 80+ = creative. Recommended: 20-60 for legal text."
+            )
+            max_tokens = st.number_input(
+                "Max Output Tokens", 
+                min_value=1, 
+                max_value=16384, 
+                value=int(exp['max_output_tokens']),
+                help="Maximum response length. 1000-2000 = summaries, 4000-8192 = detailed analysis, 8192 = comprehensive extraction."
+            )
+            extraction_strategy = st.selectbox(
+                "Extraction Strategy", 
+                ['single_test', 'multi_test', 'full_text_comparison'],
+                index=['single_test', 'multi_test', 'full_text_comparison'].index(exp['extraction_strategy']),
+                help="single_test: Extract one primary legal test per case | multi_test: Extract multiple tests if present | full_text_comparison: Compare entire case texts for patterns"
+            )
         
         # Prompts Configuration
         st.subheader("📝 Prompts Configuration")
@@ -245,7 +581,7 @@ def show_experiment_configuration():
                 # Create a copy of the experiment
                 base_name = name if name and name.strip() else "Unnamed_Experiment"
                 new_name = f"{base_name}_copy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                if save_experiment(None, new_name, description, status, ai_model, temperature, 
+                if save_experiment(None, new_name, description, researcher_name, status, ai_model, temperature, 
                                   top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
                                   comparison_prompt, system_instruction, cost_limit):
                     st.success(f"Experiment cloned as '{new_name}'!")
@@ -262,14 +598,14 @@ def show_experiment_configuration():
             if not name or not name.strip():
                 st.error("Experiment name is required!")
             else:
-                if save_experiment(editing_id, name, description, status, ai_model, temperature,
+                if save_experiment(editing_id, name, description, researcher_name, status, ai_model, temperature,
                                  top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
                                  comparison_prompt, system_instruction, cost_limit):
                     st.success("Experiment saved successfully!")
                     st.session_state.editing_experiment = None
                     st.rerun()
 
-def save_experiment(experiment_id, name, description, status, ai_model, temperature, top_p, 
+def save_experiment(experiment_id, name, description, researcher_name, status, ai_model, temperature, top_p, 
                    top_k, max_tokens, extraction_strategy, extraction_prompt, 
                    comparison_prompt, system_instruction, cost_limit):
     """Save experiment configuration to database"""
@@ -277,24 +613,28 @@ def save_experiment(experiment_id, name, description, status, ai_model, temperat
         if experiment_id:
             # Update existing experiment
             execute_sql("""
-                UPDATE experiments SET 
-                    name = ?, description = ?, status = ?, ai_model = ?, temperature = ?,
+                UPDATE v2_experiments SET 
+                    name = ?, description = ?, researcher_name = ?, status = ?, ai_model = ?, temperature = ?,
                     top_p = ?, top_k = ?, max_output_tokens = ?, extraction_strategy = ?,
                     extraction_prompt = ?, comparison_prompt = ?, system_instruction = ?,
                     cost_limit_usd = ?, modified_date = CURRENT_TIMESTAMP
                 WHERE experiment_id = ?
-            """, (name, description, status, ai_model, temperature, top_p, top_k, max_tokens,
+            """, (name, description, researcher_name, status, ai_model, temperature, top_p, top_k, max_tokens,
                   extraction_strategy, extraction_prompt, comparison_prompt, system_instruction,
                   cost_limit, experiment_id))
         else:
             # Create new experiment
             execute_sql("""
-                INSERT INTO experiments (name, description, status, ai_model, temperature, top_p,
+                INSERT INTO v2_experiments (name, description, researcher_name, status, ai_model, temperature, top_p,
                                        top_k, max_output_tokens, extraction_strategy, extraction_prompt,
                                        comparison_prompt, system_instruction, cost_limit_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (name, description, status, ai_model, temperature, top_p, top_k, max_tokens,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, description, researcher_name, status, ai_model, temperature, top_p, top_k, max_tokens,
                   extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit))
+        
+        # Clear caches after modifying experiments
+        get_experiments_list.clear()
+        _get_experiment_detail.clear()
         
         return True
     except Exception as e:
@@ -302,157 +642,172 @@ def save_experiment(experiment_id, name, description, status, ai_model, temperat
         return False
 
 def show_case_management():
-    """Show case management interface"""
-    st.header("📚 Case Management")
-    st.markdown("*Shared case database used across all experiments*")
+    """Show experiment case selection interface"""
+    st.header("📚 Experiment Case Selection")
+    st.markdown("*Select specific cases from the database to include in all experiments*")
     
-    # Get case summary
-    summary = get_case_summary()
+    # Get database counts
+    total_cases, selected_cases, tests_count, comparisons_count, validated_count = get_database_counts()
     
-    if summary:
-        # Overview metrics
-        st.subheader("📊 Database Overview")
+    # 1. Data Management (moved to top)
+    with st.expander("1️⃣ **Data Management**", expanded=False):
+        # Admin password protection
+        admin_password = st.text_input("🔐 Admin Password (required for data operations)", 
+                                     type="password", key="admin_password_dashboard")
+        is_admin = admin_password == "scc2024admin"
+        
+        if not is_admin:
+            st.warning("⚠️ Admin password required to access data loading and clearing functions.")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("📤 Upload Data")
+                uploaded_file = st.file_uploader("Choose a Parquet file", type="parquet", 
+                                               disabled=not is_admin)
+                if uploaded_file is not None and is_admin:
+                    # Batch skip option
+                    col_a, col_b = st.columns([2, 1])
+                    with col_a:
+                        if st.button("🚀 Load Data", type="primary"):
+                            with st.spinner("Loading data..."):
+                                load_data_from_parquet(uploaded_file)
+                                st.rerun()  # Refresh to update metrics
+                    
+                    with col_b:
+                        start_batch = st.number_input("Start Batch", min_value=1, value=1, 
+                                                    step=1, help="Skip to batch number (100 cases per batch)")
+                        if st.button("⏭️ Load from Batch", type="secondary"):
+                            with st.spinner(f"Loading from batch {start_batch}..."):
+                                load_data_from_parquet(uploaded_file, start_batch=start_batch)
+                                st.rerun()  # Refresh to update metrics
+            
+            with col2:
+                st.subheader("🗑️ Database Management")
+                if st.button("Clear All Data", disabled=not is_admin, type="secondary"):
+                    if st.checkbox("I understand this will delete ALL data", key="confirm_clear"):
+                        if clear_database():
+                            st.rerun()
+    
+    # 2. Database Overview
+    with st.expander("2️⃣ **Database Overview**", expanded=True):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Total Cases", summary['total_cases'])
+            st.metric("Total Cases Available", f"{total_cases:,}")
         with col2:
-            st.metric("Extracted Tests", summary['total_tests'])
+            st.metric("Cases Selected for Experiments", f"{selected_cases:,}")
         with col3:
-            st.metric("Validated Tests", summary['validated_tests'])
+            st.metric("Extracted Tests", f"{tests_count:,}")
         with col4:
-            st.metric("Comparisons Made", summary['total_comparisons'])
+            st.metric("Comparisons Made", f"{comparisons_count:,}")
         
-        # Additional statistics
-        if summary['year_range'][0]:
-            year_span = f"{summary['year_range'][0]} - {summary['year_range'][1]}"
-            st.metric("Year Range", year_span, f"{summary['year_range'][2]} years")
-        
-        # Top areas of law
-        if summary['top_areas']:
-            st.subheader("📈 Top Areas of Law")
-            areas_df = pd.DataFrame(summary['top_areas'], columns=['Area of Law', 'Case Count'])
-            st.bar_chart(areas_df.set_index('Area of Law'))
+        if selected_cases > 0:
+            st.info(f"✅ **Experiment Dataset:** {selected_cases} cases selected. All experiments will run on these cases.")
+        else:
+            st.warning("⚠️ **No cases selected yet.** Select cases below to create your experiment dataset.")
     
-    st.divider()
-    
-    # Data Loading Interface
-    st.subheader("📁 Data Loading")
-    
-    # Admin password protection
-    admin_password = st.text_input("🔐 Admin Password (required for data operations)", 
-                                 type="password", key="admin_password_dashboard")
-    is_admin = admin_password == "parquet2040"
-    
-    if not is_admin:
-        st.warning("⚠️ Admin password required to access data loading and clearing functions.")
-    else:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📤 Upload Data")
-            uploaded_file = st.file_uploader("Choose a Parquet file", type="parquet", 
-                                           disabled=not is_admin)
-            if uploaded_file is not None and is_admin:
-                if st.button("🚀 Load Data", type="primary"):
-                    with st.spinner("Loading data..."):
-                        load_data_from_parquet(uploaded_file)
-                        st.rerun()  # Refresh to update metrics
-        
-        with col2:
-            st.subheader("🗑️ Database Management")
-            if st.button("Clear All Data", disabled=not is_admin, type="secondary"):
-                if st.checkbox("I understand this will delete ALL data", key="confirm_clear"):
-                    if clear_database():
-                        st.rerun()
-    
-    st.divider()
-    
-    # Case Filtering and Sampling
-    st.subheader("🎯 Case Filtering & Sampling")
-    
-    available_cases = get_available_cases()
-    
-    if not available_cases.empty:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Year range filter
-            min_year = int(available_cases['decision_year'].min())
-            max_year = int(available_cases['decision_year'].max())
-            year_range = st.slider("Year Range", min_year, max_year, (min_year, max_year))
-            
-            # Area of law filter
-            unique_areas = available_cases['area_of_law'].dropna().unique()
-            selected_areas = st.multiselect("Areas of Law", unique_areas, default=unique_areas[:5])
-            
-            # Sample size
-            sample_size = st.number_input("Sample Size (0 = all cases)", 
-                                        min_value=0, max_value=len(available_cases), 
-                                        value=min(100, len(available_cases)))
-        
-        with col2:
-            st.write("**Filter Preview:**")
-            
-            if st.button("🔍 Apply Filters"):
-                filtered_cases = filter_cases_by_criteria(
-                    year_range=year_range,
-                    areas=selected_areas if selected_areas else None,
-                    sample_size=sample_size if sample_size > 0 else None
+    # 3. Case Selection for Experiments
+    with st.expander("3️⃣ **Case Selection for Experiments**", expanded=True):
+        # Show currently selected cases
+        selected_cases_df = get_experiment_selected_cases()
+        if not selected_cases_df.empty:
+            with st.expander(f"📋 Currently Selected Cases ({len(selected_cases_df)})"):
+                st.dataframe(
+                    selected_cases_df[['case_name', 'citation', 'decision_year', 'area_of_law', 'selected_date']],
+                    use_container_width=True
                 )
-                
-                st.session_state.filtered_cases = filtered_cases
-                st.success(f"Filtered to {len(filtered_cases)} cases")
         
-        # Show filtered results
-        if 'filtered_cases' in st.session_state and not st.session_state.filtered_cases.empty:
-            st.subheader("📋 Filtered Cases")
+        # Add new cases interface
+        if total_cases > selected_cases:
+            st.subheader("➕ Add Cases to Experiments")
             
-            # Add export functionality
-            col1, col2 = st.columns([3, 1])
+            col1, col2 = st.columns(2)
+            
             with col1:
-                st.write(f"**{len(st.session_state.filtered_cases)} cases selected**")
-            with col2:
-                csv = st.session_state.filtered_cases.to_csv(index=False)
-                st.download_button(
-                    label="📥 Export CSV",
-                    data=csv,
-                    file_name=f"filtered_cases_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-            
-            # Paginated display
-            items_per_page = st.selectbox("Cases per page:", [10, 25, 50], index=1)
-            total_pages = (len(st.session_state.filtered_cases) + items_per_page - 1) // items_per_page
-            
-            if total_pages > 1:
-                current_page = st.selectbox("Page:", range(1, total_pages + 1)) - 1
-            else:
-                current_page = 0
-            
-            start_idx = current_page * items_per_page
-            end_idx = start_idx + items_per_page
-            page_data = st.session_state.filtered_cases.iloc[start_idx:end_idx]
-            
-            # Display cases
-            for idx, case in page_data.iterrows():
-                with st.container():
-                    col1, col2, col3 = st.columns([3, 2, 1])
-                    
-                    with col1:
-                        st.write(f"**{case['case_name']}**")
-                        st.caption(f"Citation: {case['citation']}")
-                    
-                    with col2:
-                        st.write(f"Year: {case['decision_year']}")
-                        st.write(f"Area: {case['area_of_law']}")
-                    
-                    with col3:
-                        st.write(f"ID: {case['case_id']}")
+                st.write("**Filters:**")
                 
-                st.divider()
-    else:
-        st.info("No cases available. Upload data to begin case management.")
+                # Get available cases for filter options
+                sample_cases = get_available_cases_for_selection(limit=1000)
+                
+                if not sample_cases.empty:
+                    # Year range filter
+                    min_year = int(sample_cases['decision_year'].min())
+                    max_year = int(sample_cases['decision_year'].max())
+                    year_filter = st.slider("Year Range", min_year, max_year, (min_year, max_year), key="experiment_year_filter")
+                    
+                    # Area of law filter
+                    unique_areas = sample_cases['area_of_law'].dropna().unique()
+                    area_filter = st.multiselect("Areas of Law (optional)", unique_areas)
+                    
+                    # Number to select
+                    available_count = len(get_available_cases_for_selection(
+                        year_range=year_filter if year_filter != (min_year, max_year) else None,
+                        areas=area_filter if area_filter else None
+                    ))
+                    
+                    num_to_select = st.number_input(
+                        f"Number of cases to randomly select",
+                        min_value=1, 
+                        max_value=min(available_count, 100), 
+                        value=min(10, available_count),
+                        help=f"{available_count} cases available with current filters"
+                    )
+            
+            with col2:
+                st.write("**Preview:**")
+                
+                if not sample_cases.empty:
+                    # Get preview of available cases
+                    preview_cases = get_available_cases_for_selection(
+                        year_range=year_filter if year_filter != (min_year, max_year) else None,
+                        areas=area_filter if area_filter else None,
+                        limit=5
+                    )
+                    
+                    if not preview_cases.empty:
+                        st.dataframe(
+                            preview_cases[['case_name', 'citation', 'decision_year', 'area_of_law']],
+                            use_container_width=True
+                        )
+                        st.caption(f"Preview of {len(preview_cases)} cases (total available: {available_count})")
+                    else:
+                        st.warning("No cases available with current filters")
+            
+            # Add cases button
+            if st.button("🎲 Randomly Select and Add Cases", type="primary"):
+                if num_to_select > 0:
+                    with st.spinner(f"Randomly selecting {num_to_select} cases..."):
+                        # Get random cases
+                        new_cases = get_available_cases_for_selection(
+                            year_range=year_filter if year_filter != (min_year, max_year) else None,
+                            areas=area_filter if area_filter else None,
+                            limit=num_to_select
+                        )
+                        
+                        if not new_cases.empty:
+                            # Add to experiments
+                            success_count, duplicate_count = add_cases_to_experiments(new_cases['case_id'].tolist())
+                            
+                            if success_count > 0:
+                                st.success(f"✅ Successfully added {success_count} cases to experiments!")
+                                
+                                # Show added cases
+                                with st.expander("📋 Cases Added"):
+                                    st.dataframe(
+                                        new_cases[['case_name', 'citation', 'decision_year', 'area_of_law']],
+                                        use_container_width=True
+                                    )
+                                
+                                st.rerun()
+                            else:
+                                st.error("Failed to add cases to experiments")
+                        else:
+                            st.error("No cases found matching the criteria")
+                else:
+                    st.error("Please select at least 1 case")
+        else:
+            st.info("All available cases have been selected for experiments")
 
 def show_experiment_comparison():
     """Show cross-experiment comparison interface"""
@@ -461,21 +816,22 @@ def show_experiment_comparison():
     
     # Get experiments with results
     experiments_with_results = execute_sql("""
-        SELECT DISTINCT 
+        SELECT 
             e.experiment_id, 
             e.name, 
             e.ai_model, 
             e.temperature, 
             e.extraction_strategy,
+            e.modified_date,
             COUNT(er.run_id) as run_count,
             SUM(er.tests_extracted) as total_tests,
             SUM(er.comparisons_completed) as total_comparisons,
             AVG(er.total_cost_usd) as avg_cost,
             MAX(er.run_date) as last_run
-        FROM experiments e
-        LEFT JOIN experiment_runs er ON e.experiment_id = er.experiment_id
+        FROM v2_experiments e
+        LEFT JOIN v2_experiment_runs er ON e.experiment_id = er.experiment_id
         WHERE e.status IN ('active', 'completed') 
-        GROUP BY e.experiment_id, e.name, e.ai_model, e.temperature, e.extraction_strategy
+        GROUP BY e.experiment_id, e.name, e.ai_model, e.temperature, e.extraction_strategy, e.modified_date
         HAVING COUNT(er.run_id) > 0
         ORDER BY e.modified_date DESC
     """, fetch=True)
@@ -486,7 +842,7 @@ def show_experiment_comparison():
     
     # Convert to DataFrame for easier handling
     columns = ['experiment_id', 'name', 'ai_model', 'temperature', 'extraction_strategy', 
-               'run_count', 'total_tests', 'total_comparisons', 'avg_cost', 'last_run']
+               'modified_date', 'run_count', 'total_tests', 'total_comparisons', 'avg_cost', 'last_run']
     exp_df = pd.DataFrame(experiments_with_results, columns=columns)
     
     # Experiment Selection
@@ -653,32 +1009,434 @@ def show_experiment_comparison():
     else:
         st.info("No experiment history available.")
 
+# Cache experiments list for 30 seconds
+@st.cache_data(ttl=30)
+def get_experiments_list():
+    """Get list of experiments for navigation"""
+    try:
+        experiments = execute_sql("""
+            SELECT experiment_id, name, status
+            FROM v2_experiments
+            ORDER BY modified_date DESC
+        """, fetch=True)
+        
+        if experiments:
+            return [{'id': exp[0], 'name': exp[1], 'status': exp[2]} for exp in experiments]
+        return []
+    except Exception as e:
+        st.error(f"Error loading experiments: {e}")
+        return []
+
+def show_sidebar_navigation():
+    """Display hierarchical sidebar navigation"""
+    # Initialize navigation state
+    if 'selected_page' not in st.session_state:
+        st.session_state.selected_page = "Library Overview"  # Default to Library Overview
+    if 'selected_experiment' not in st.session_state:
+        st.session_state.selected_experiment = None
+    
+    # Custom CSS for compact application-like sidebar
+    st.markdown("""
+    <style>
+    /* Compact sidebar styling */
+    .stSidebar .stButton > button {
+        padding: 0.5rem 1rem !important;
+        margin: 0.2rem 0 !important;
+        border-radius: 6px !important;
+        font-size: 0.9rem !important;
+        height: auto !important;
+        min-height: 2.5rem !important;
+    }
+    
+    /* Selected navigation buttons - blue theme */
+    div[data-testid="stSidebar"] button[kind="secondary"] {
+        background-color: #0066cc !important;
+        color: white !important;
+        border: 1px solid #004499 !important;
+        box-shadow: 0 2px 4px rgba(0,102,204,0.2) !important;
+    }
+    div[data-testid="stSidebar"] button[kind="secondary"]:hover {
+        background-color: #0056b3 !important;
+        color: white !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 8px rgba(0,102,204,0.3) !important;
+    }
+    
+    /* Action buttons - red theme */
+    div[data-testid="stSidebar"] button[kind="primary"] {
+        background-color: #ff4b4b !important;
+        color: white !important;
+        border: 1px solid #cc0000 !important;
+        box-shadow: 0 2px 4px rgba(255,75,75,0.2) !important;
+    }
+    div[data-testid="stSidebar"] button[kind="primary"]:hover {
+        background-color: #e60000 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 8px rgba(255,75,75,0.3) !important;
+    }
+    
+    /* Default buttons - clean styling */
+    div[data-testid="stSidebar"] button:not([kind]) {
+        background-color: #f8f9fa !important;
+        color: #333 !important;
+        border: 1px solid #dee2e6 !important;
+        transition: all 0.2s ease !important;
+    }
+    div[data-testid="stSidebar"] button:not([kind]):hover {
+        background-color: #e9ecef !important;
+        color: #000 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1) !important;
+    }
+    
+    /* Experiment list styling */
+    .stSidebar .stExpander {
+        border: 1px solid #dee2e6 !important;
+        border-radius: 8px !important;
+        margin: 0.5rem 0 !important;
+    }
+    
+    /* Compact spacing */
+    .stSidebar .stMarkdown {
+        margin: 0.3rem 0 !important;
+    }
+    
+    /* Settings button special styling */
+    div[data-testid="stSidebar"] button[aria-label*="Settings"] {
+        padding: 0.3rem 0.5rem !important;
+        font-size: 1.1rem !important;
+        min-height: 2rem !important;
+        border-radius: 50% !important;
+        width: 2.5rem !important;
+        height: 2.5rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Navigation section header
+    st.sidebar.markdown("**📋 Navigation**")
+    
+    # 1. Create New Experiment (At the top)
+    if st.sidebar.button("➕ Create New Experiment", use_container_width=True, type="primary"):
+        st.session_state.selected_page = "Create Experiment"
+        st.session_state.selected_experiment = None
+        st.session_state.editing_experiment = None  # Clear edit state
+        st.rerun()
+    
+    # Small separator
+    st.sidebar.markdown("")
+    
+    # 2. Experiment Library (Expandable)
+    with st.sidebar.expander("🧪 Experiment Library", expanded=True):
+        # Overview option
+        is_active = st.session_state.selected_page == "Library Overview"
+        button_kwargs = {"use_container_width": True}
+        if is_active:
+            button_kwargs["type"] = "secondary"
+        
+        if st.button("📊 Library Overview", **button_kwargs):
+            st.session_state.selected_page = "Library Overview"
+            st.session_state.selected_experiment = None
+            st.rerun()
+            st.session_state.selected_page = "Library Overview"
+            st.session_state.selected_experiment = None
+            st.rerun()
+        
+        # Individual experiments - show by default
+        experiments = get_experiments_list()
+        if experiments:
+            st.markdown("*Experiments:*")
+            for exp in experiments:
+                status_emoji = {
+                    'draft': '🟡',
+                    'active': '🟢', 
+                    'completed': '🔵',
+                    'archived': '⚫'
+                }.get(exp['status'], '⚪')
+                
+                # Add experiment number and truncate long names for better UI
+                display_name = exp['name'][:20] + "..." if len(exp['name']) > 20 else exp['name']
+                button_label = f"{status_emoji} #{exp['id']} {display_name}"
+                is_selected = (st.session_state.selected_page == "Experiment Detail" and 
+                             st.session_state.selected_experiment == exp['id'])
+                
+                button_kwargs = {"use_container_width": True, "key": f"exp_{exp['id']}"}
+                if is_selected:
+                    button_kwargs["type"] = "secondary"
+                
+                if st.button(button_label, **button_kwargs):
+                    st.session_state.selected_page = "Experiment Detail"
+                    st.session_state.selected_experiment = exp['id']
+                    st.rerun()
+        else:
+            st.caption("No experiments found")
+    
+    # Small separator
+    st.sidebar.markdown("")
+    
+    # 3. Experiment Comparison
+    is_active = st.session_state.selected_page == "Comparison"
+    button_kwargs = {"use_container_width": True}
+    if is_active:
+        button_kwargs["type"] = "secondary"
+    
+    if st.sidebar.button("📈 Experiment Comparison", **button_kwargs):
+        st.session_state.selected_page = "Comparison"
+        st.session_state.selected_experiment = None
+        st.rerun()
+    
+    # Small separator
+    st.sidebar.markdown("")
+    
+    # 4. Cases (Blue button)
+    is_active = st.session_state.selected_page == "Cases"
+    button_kwargs = {"use_container_width": True}
+    if is_active:
+        button_kwargs["type"] = "secondary"
+    
+    if st.sidebar.button("📚 View/Add Cases to Experiments", **button_kwargs):
+        st.session_state.selected_page = "Cases"
+        st.session_state.selected_experiment = None
+        st.rerun()
+
+# Cache experiment details for 60 seconds
+@st.cache_data(ttl=60)
+def _get_experiment_detail(experiment_id):
+    """Get experiment details from database"""
+    exp_data = execute_sql(
+        "SELECT experiment_id, name, description, researcher_name, status, ai_model, temperature, top_p, top_k, max_output_tokens, extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit_usd, created_date, modified_date, created_by FROM v2_experiments WHERE experiment_id = ?", 
+        (experiment_id,), 
+        fetch=True
+    )
+    
+    if not exp_data:
+        return None
+    
+    # Convert row to dictionary, handling any data type conversion needed
+    row = exp_data[0]
+    return {
+        'experiment_id': row[0],
+        'name': row[1], 
+        'description': row[2],
+        'researcher_name': row[3],
+        'status': row[4],
+        'ai_model': row[5],
+        'temperature': float(row[6]) if row[6] is not None else 0.0,
+        'top_p': float(row[7]) if row[7] is not None else 1.0,
+        'top_k': int(row[8]) if row[8] is not None else 40,
+        'max_output_tokens': int(row[9]) if row[9] is not None else 8192,
+        'extraction_strategy': row[10],
+        'extraction_prompt': row[11],
+        'comparison_prompt': row[12], 
+        'system_instruction': row[13],
+        'cost_limit_usd': float(row[14]) if row[14] is not None else 100.0,
+        'created_date': row[15],
+        'modified_date': row[16],
+        'created_by': row[17]
+    }
+
+def show_experiment_detail(experiment_id):
+    """Show details for a specific experiment with comprehensive cost analysis"""
+    try:
+        exp = _get_experiment_detail(experiment_id)
+        
+        if not exp:
+            st.error("Experiment not found!")
+            return
+        
+        st.title(f"🧪 Experiment #{exp['experiment_id']}: {exp['name']}")
+        
+        # Status with color
+        status_colors = {
+            'draft': '🟡 Draft',
+            'active': '🟢 Active', 
+            'completed': '🔵 Completed',
+            'archived': '⚫ Archived'
+        }
+        st.markdown(f"**Status:** {status_colors.get(exp['status'], exp['status'])}")
+        
+        # Get shared data for cost calculations
+        try:
+            selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
+            total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
+            
+            if selected_cases_count > 0:
+                selected_lengths = execute_sql("""
+                    SELECT AVG(c.case_length) 
+                    FROM v2_cases c 
+                    JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
+                    WHERE c.case_length IS NOT NULL
+                """, fetch=True)
+                avg_selected_case_length = float(selected_lengths[0][0]) if selected_lengths and selected_lengths[0][0] else 52646.0
+            else:
+                avg_selected_case_length = 52646.0
+                
+            all_lengths = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
+            avg_all_case_length = float(all_lengths[0][0]) if all_lengths and all_lengths[0][0] else 52646.0
+        except:
+            selected_cases_count = 0
+            total_cases_count = 0
+            avg_selected_case_length = 52646.0
+            avg_all_case_length = 52646.0
+        
+        # Calculate comprehensive cost data
+        n_cases = selected_cases_count
+        required_comparisons = calculate_bradley_terry_comparisons(n_cases)
+        
+        # Bradley-Terry parameters
+        block_size = 15
+        core_cases_per_block = 12
+        comparisons_per_block = 105
+        
+        # Get run statistics
+        runs_data = execute_sql("""
+            SELECT COUNT(*) as run_count,
+                   SUM(tests_extracted) as total_tests,
+                   SUM(comparisons_completed) as total_comparisons,
+                   SUM(total_cost_usd) as total_cost
+            FROM v2_experiment_runs 
+            WHERE experiment_id = ?
+        """, (experiment_id,), fetch=True)
+        
+        if runs_data and runs_data[0]:
+            stats = runs_data[0]
+            total_tests = stats[1] or 0
+            total_comparisons = stats[2] or 0
+            total_cost = stats[3] or 0
+        else:
+            total_tests = 0
+            total_comparisons = 0
+            total_cost = 0
+        
+        # Layout in tabs for organization
+        tab1, tab2, tab3 = st.tabs(["📋 Configuration", "📊 Progress & Stats", "🎯 Actions"])
+        
+        with tab1:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Basic Information")
+                st.write(f"**Description:** {exp['description'] or 'No description'}")
+                st.write(f"**Researcher:** {exp.get('researcher_name', 'Not specified')}")
+                st.write(f"**Created:** {exp['created_date'][:10] if exp['created_date'] else 'Unknown'}")
+                st.write(f"**Modified:** {exp['modified_date'][:10] if exp['modified_date'] else 'Unknown'}")
+            
+            with col2:
+                st.subheader("AI Configuration")
+                st.write(f"**Model:** {exp['ai_model']}")
+                st.write(f"**Temperature:** {exp['temperature']}")
+                st.write(f"**Top P:** {exp.get('top_p', 1.0)}")
+                st.write(f"**Top K:** {exp.get('top_k', 40)}")
+                st.write(f"**Max Tokens:** {exp.get('max_output_tokens', 8192)}")
+                st.write(f"**Strategy:** {exp['extraction_strategy']}")
+                st.write(f"**Cost Limit:** ${exp['cost_limit_usd']}")
+        
+        with tab2:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Current Progress")
+                st.metric("Tests Extracted", f"{total_tests}/{n_cases}")
+                st.metric("Comparisons Made", f"{total_comparisons}/{required_comparisons}")
+                st.metric("Total Spent", f"${total_cost:.2f}")
+                
+                if n_cases > 0:
+                    extraction_progress = total_tests / n_cases
+                    st.progress(extraction_progress, text=f"Extraction Progress: {extraction_progress:.1%}")
+                
+                if required_comparisons > 0:
+                    comparison_progress = total_comparisons / required_comparisons
+                    st.progress(comparison_progress, text=f"Comparison Progress: {comparison_progress:.1%}")
+            
+            with col2:
+                st.subheader("Sample Information")
+                st.metric("Sample Size", f"{n_cases} cases")
+                st.metric("Total Database", f"{total_cases_count:,} cases")
+                st.metric("Required Comparisons", f"{required_comparisons:,}")
+                
+                # Show comparison strategy
+                if n_cases <= block_size:
+                    comparison_strategy = "Full pairwise"
+                else:
+                    blocks_needed = (n_cases + core_cases_per_block - 1) // core_cases_per_block
+                    comparison_strategy = f"Bradley-Terry ({blocks_needed} blocks)"
+                
+                st.write(f"**Comparison Strategy:** {comparison_strategy}")
+        
+        with tab3:
+            st.subheader("🎯 Available Actions")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("⚙️ Edit Configuration", type="secondary", use_container_width=True):
+                    st.session_state.editing_experiment = experiment_id
+                    st.session_state.selected_page = "Create Experiment"
+                    st.rerun()
+            
+            with col2:
+                if st.button("▶️ Execute Experiment", type="primary", use_container_width=True):
+                    st.session_state.active_experiment = experiment_id
+                    st.session_state.page_navigation = "⚗️ Experiment Execution"
+                    st.rerun()
+            
+            with col3:
+                if st.button("📈 View in Comparison", type="secondary", use_container_width=True):
+                    st.session_state.selected_page = "Comparison"
+                    st.rerun()
+            
+            st.write("")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("📋 Back to Overview", use_container_width=True):
+                    st.session_state.selected_page = "Library Overview"
+                    st.rerun()
+            
+            with col2:
+                if st.button("📋 Clone Experiment", use_container_width=True):
+                    # Set up cloning by copying the experiment data
+                    st.session_state.editing_experiment = None
+                    st.session_state.clone_from_experiment = experiment_id
+                    st.session_state.selected_page = "Create Experiment"
+                    st.rerun()
+                
+    except Exception as e:
+        st.error(f"Error loading experiment details: {e}")
+        st.write("Debug info:")
+        st.write(f"Experiment ID: {experiment_id}")
+        st.write(f"Error: {str(e)}")
+
 def show():
     """Main dashboard interface"""
     # Initialize database tables
     initialize_experiment_tables()
     
-    # Main dashboard layout
+    # Show sidebar navigation
+    show_sidebar_navigation()
+    
+    # Main content area
     st.title("🧪 Legal Research Experimentation Platform")
-    st.markdown("*Meta-level experiment management and comparison interface*")
     
-    # Tab navigation for dashboard sections
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "⚙️ Configuration", "📚 Cases", "📈 Comparison"])
+    # Get current page from session state
+    current_page = st.session_state.get('selected_page', 'Cases')
     
-    with tab1:
+    # Render content based on selected page
+    if current_page == "Cases":
+        show_case_management()
+        
+    elif current_page == "Library Overview":
         show_experiment_overview()
         
-        # Quick create experiment button
-        if st.button("➕ Create New Experiment", type="primary"):
-            st.session_state.editing_experiment = None  # Clear any existing edit state
-            st.session_state.dashboard_tab = "Configuration"
-            st.rerun()
-    
-    with tab2:
-        show_experiment_configuration()
-    
-    with tab3:
-        show_case_management()
-    
-    with tab4:
+    elif current_page == "Experiment Detail":
+        experiment_id = st.session_state.get('selected_experiment')
+        if experiment_id:
+            show_experiment_detail(experiment_id)
+        else:
+            st.error("No experiment selected")
+            
+    elif current_page == "Comparison":
         show_experiment_comparison()
+        
+    elif current_page == "Create Experiment":
+        show_experiment_configuration()

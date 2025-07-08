@@ -2248,7 +2248,10 @@ if __name__ == "__main__":
                 
                 # Check minimum data requirements
                 min_comparisons_needed = n_items - 1  # Minimum for connectivity
-                recommended_comparisons = n_items * (n_items - 1) // 4  # At least 25% of all possible pairs
+                
+                # Calculate recommended comparisons using Bradley-Terry design
+                from utils.case_management import calculate_bradley_terry_comparisons
+                recommended_comparisons = calculate_bradley_terry_comparisons(n_items)
                 
                 if len(comparison_data) < min_comparisons_needed:
                     st.error(f"❌ Insufficient comparison data: {len(comparison_data)} comparisons found, but need at least {min_comparisons_needed} for {n_items} tests.")
