@@ -100,12 +100,15 @@ def load_api_key():
     if env_key:
         return env_key
     
-    # Second, try Streamlit secrets (for Streamlit Cloud)
-    try:
-        if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
-            return st.secrets['GEMINI_API_KEY']
-    except:
-        pass
+    # Second, try Streamlit secrets (for Streamlit Cloud only)
+    # Only check secrets if we're in production (DATABASE_URL is set)
+    if DATABASE_URL:
+        try:
+            if hasattr(st, 'secrets') and 'GEMINI_API_KEY' in st.secrets:
+                return st.secrets['GEMINI_API_KEY']
+        except Exception:
+            # Silently pass - secrets may not be configured yet
+            pass
     
     # Third, try local file (for development)
     if API_KEY_FILE and os.path.exists(API_KEY_FILE):
