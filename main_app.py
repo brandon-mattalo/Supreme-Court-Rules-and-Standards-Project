@@ -991,10 +991,10 @@ if __name__ == "__main__":
     # Calculate progress indicators
     conn = get_database_connection()
     try:
-        cases_count = pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0]
-        tests_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0]
-        comparisons_count = pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0]
-        validated_count = pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0]
+        cases_count = int(pd.read_sql("SELECT COUNT(*) FROM cases", conn).iloc[0, 0])
+        tests_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests", conn).iloc[0, 0])
+        comparisons_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_test_comparisons", conn).iloc[0, 0])
+        validated_count = int(pd.read_sql("SELECT COUNT(*) FROM legal_tests WHERE validation_status = 'accurate'", conn).iloc[0, 0])
     finally:
         conn.close()
 
@@ -1465,7 +1465,7 @@ if __name__ == "__main__":
             # Show comparison progress
             conn = get_database_connection()
             try:
-                existing_comparisons = pd.read_sql("SELECT COUNT(*) as count FROM legal_test_comparisons", conn).iloc[0]['count']
+                existing_comparisons = int(pd.read_sql("SELECT COUNT(*) as count FROM legal_test_comparisons", conn).iloc[0]['count'])
                 total_possible = len(validated_tests) * (len(validated_tests) - 1) // 2
                 
                 # Get compared pairs if needed
