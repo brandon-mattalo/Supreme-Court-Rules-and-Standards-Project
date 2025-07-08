@@ -1001,31 +1001,42 @@ if __name__ == "__main__":
     # Section 1: Data Loading
     data_status = "✅ Complete" if cases_count > 0 else "📋 Pending"
     with st.expander(f"📁 **1. Data Loading** - {data_status} ({cases_count} cases loaded)", expanded=(cases_count == 0)):
-        uploaded_file = st.file_uploader("Choose a Parquet file", type="parquet")
-        if uploaded_file is not None:
+        
+        # Admin password protection
+        admin_password = st.text_input("🔐 Admin Password (required for data operations)", type="password", key="admin_password")
+        is_admin = admin_password == "parquet2040"
+        
+        if not is_admin:
+            st.warning("⚠️ Admin password required to access data loading and clearing functions.")
+        
+        # File uploader - disabled unless admin
+        uploaded_file = st.file_uploader("Choose a Parquet file", type="parquet", disabled=not is_admin)
+        if uploaded_file is not None and is_admin:
             load_data_from_parquet(uploaded_file)
             st.success("Data loaded successfully!")
             st.rerun()  # Refresh to update progress indicators
 
         col_clear1, col_clear2 = st.columns(2)
         with col_clear1:
-            if st.button("Clear Cases Database"):
-                # Clear tables in dependency order due to foreign key constraints
-                execute_sql("DELETE FROM legal_test_comparisons")
-                execute_sql("DELETE FROM legal_tests")
-                execute_sql("DELETE FROM cases")
-                st.success("Cases, legal tests, and comparisons database cleared.")
-                # Clear relevant session state variables
-                if 'cases_to_sample' in st.session_state: del st.session_state.cases_to_sample
-                if 'test_to_edit' in st.session_state: del st.session_state.test_to_edit
-                if 'confirming_extraction' in st.session_state: del st.session_state.confirming_extraction
-                st.rerun()
+            if st.button("Clear Cases Database", disabled=not is_admin):
+                if is_admin:
+                    # Clear tables in dependency order due to foreign key constraints
+                    execute_sql("DELETE FROM legal_test_comparisons")
+                    execute_sql("DELETE FROM legal_tests")
+                    execute_sql("DELETE FROM cases")
+                    st.success("Cases, legal tests, and comparisons database cleared.")
+                    # Clear relevant session state variables
+                    if 'cases_to_sample' in st.session_state: del st.session_state.cases_to_sample
+                    if 'test_to_edit' in st.session_state: del st.session_state.test_to_edit
+                    if 'confirming_extraction' in st.session_state: del st.session_state.confirming_extraction
+                    st.rerun()
         with col_clear2:
-            if st.button("Clear Extracted Tests Database"):
-                # Clear comparisons first due to foreign key constraint
-                execute_sql("DELETE FROM legal_test_comparisons")
-                execute_sql("DELETE FROM legal_tests")
-                st.success("Extracted tests and comparisons database cleared.")
+            if st.button("Clear Extracted Tests Database", disabled=not is_admin):
+                if is_admin:
+                    # Clear comparisons first due to foreign key constraint
+                    execute_sql("DELETE FROM legal_test_comparisons")
+                    execute_sql("DELETE FROM legal_tests")
+                    st.success("Extracted tests and comparisons database cleared.")
                 # Clear relevant session state variables
                 if 'test_to_edit' in st.session_state: del st.session_state.test_to_edit
                 st.rerun()
@@ -1313,7 +1324,7 @@ if __name__ == "__main__":
     finally:
         conn.close()
     
-    validation_status = f"✅ {validated_count} validated" if validated_count > 0 else f"🔄 {len(pending_tests)} pending" if len(pending_tests) > 0 else "📋 No tests yet"
+    validation_status = f"✅ {validated_count} validated" if validated_count > 0 and len(pending_tests) == 0 else f"⚠️ {len(pending_tests)} waiting to be validated" if len(pending_tests) > 0 else "📋 No tests yet"
     with st.expander(f"🔍 **4. Human Validation** - {validation_status}", expanded=(len(pending_tests) > 0 and validated_count < 5)):
         if pending_tests.empty:
             st.info("No tests are currently pending validation.")
@@ -1635,41 +1646,6 @@ if __name__ == "__main__":
                         st.rerun()
                     else:
                         st.info("No remaining pairs to compare.")
-            
-            # Add diagnostic feature for AI comparison mapping issues
-            st.write("---")
-            if st.checkbox("🔧 Show Debug AI Comparisons (Advanced)", key="show_debug_comparisons"):
-                st.write("This section helps diagnose and fix AI comparison mapping issues.")
-                
-                if st.button("Check AI Comparison Consistency"):
-                    conn = get_database_connection()
-                    try:
-                        ai_comparisons = pd.read_sql("""
-                            SELECT ltc.*, 
-                                   c1.case_name as case1_name, c2.case_name as case2_name,
-                                   winner_c.case_name as winner_name
-                            FROM legal_test_comparisons ltc
-                            JOIN legal_tests lt1 ON ltc.test_id_1 = lt1.test_id
-                            JOIN legal_tests lt2 ON ltc.test_id_2 = lt2.test_id
-                            JOIN legal_tests winner_lt ON ltc.more_rule_like_test_id = winner_lt.test_id
-                            JOIN cases c1 ON lt1.case_id = c1.case_id
-                            JOIN cases c2 ON lt2.case_id = c2.case_id
-                            JOIN cases winner_c ON winner_lt.case_id = winner_c.case_id
-                            WHERE ltc.comparison_method = 'ai_generated'
-                        AND ltc.reasoning NOT LIKE 'AI Comparison: Test A =%'
-                    """, conn)
-                    finally:
-                        conn.close()
-                    
-                    if not ai_comparisons.empty:
-                        st.warning(f"Found {len(ai_comparisons)} AI comparisons that may have mapping issues:")
-                        for _, comp in ai_comparisons.iterrows():
-                            st.write(f"**Comparison #{comp['comparison_id']}**: Winner = {comp['winner_name']}")
-                            st.write(f"Reasoning: {comp['reasoning'][:200]}...")
-                            st.write("---")
-                    else:
-                        st.success("All AI comparisons appear to have consistent mapping!")
-            
             # Comparison Review Table - as collapsible subsection
             st.write("---")
             review_status = f"📊 {comparisons_count} comparisons" if comparisons_count > 0 else "📋 No comparisons yet"
@@ -1761,7 +1737,8 @@ if __name__ == "__main__":
                             with col_header1:
                                 st.write(f"**Comparison #{comp['comparison_id']}** - {comp['comparison_method'].title()}")
                             with col_header2:
-                                st.write(f"*{comp['timestamp'][:10]}*")
+                                timestamp_display = str(comp['timestamp'])[:10] if comp['timestamp'] else "Unknown"
+                                st.write(f"*{timestamp_display}*")
                             with col_header3:
                                 method_emoji = "🤖" if comp['comparison_method'] == 'ai_generated' else "👤"
                                 st.write(f"{method_emoji} {comp['comparator_name']}")
@@ -1893,6 +1870,153 @@ if __name__ == "__main__":
     
     with st.expander(f"📈 **6. Analysis** - {analysis_status}", expanded=st.session_state.analysis_expander_open):
         
+        # Analysis buttons at the top
+        if 'analysis_results' in st.session_state and st.session_state.analysis_results is not None:
+            # Button to clear results and run new analysis
+            if st.button("🔄 Run New Analysis"):
+                del st.session_state.analysis_results
+                if 'analysis_comparisons_count' in st.session_state:
+                    del st.session_state.analysis_comparisons_count
+                st.rerun()
+        else:
+            if st.button("Run Analysis"):
+                # Check if user has entered their name
+                if not can_user_proceed():
+                    show_name_required_error()
+                
+                conn = get_database_connection()
+                try:
+                    # Get validated tests and their comparisons
+                    validated_tests = pd.read_sql("""
+                        SELECT lt.*, c.case_name, c.citation, c.decision_year
+                        FROM legal_tests lt 
+                        JOIN cases c ON lt.case_id = c.case_id 
+                        WHERE lt.validation_status = 'accurate'
+                        ORDER BY lt.test_id
+                    """, conn)
+                    
+                    comparisons = pd.read_sql("""
+                        SELECT test_id_1, test_id_2, more_rule_like_test_id 
+                    FROM legal_test_comparisons
+                    """, conn)
+                finally:
+                    conn.close()
+                
+                if len(validated_tests) < 2:
+                    st.error("Need at least 2 validated tests to run analysis.")
+                    st.stop()
+                
+                if len(comparisons) == 0:
+                    st.error("Need at least 1 comparison to run analysis.")
+                    st.stop()
+                
+                # Perform Bradley-Terry analysis
+                st.write("Performing Bradley-Terry analysis...")
+                
+                # Build comparison matrix
+                test_ids = validated_tests['test_id'].tolist()
+                test_id_to_idx = {test_id: idx for idx, test_id in enumerate(test_ids)}
+                n_items = len(test_ids)
+                
+                # Create comparison data for choix
+                comparison_data = []
+                for _, comp in comparisons.iterrows():
+                    if comp['test_id_1'] in test_id_to_idx and comp['test_id_2'] in test_id_to_idx:
+                        idx1 = test_id_to_idx[comp['test_id_1']]
+                        idx2 = test_id_to_idx[comp['test_id_2']]
+                        winner_idx = test_id_to_idx[comp['more_rule_like_test_id']]
+                        
+                        if winner_idx == idx1:
+                            comparison_data.append((idx1, idx2))
+                        else:
+                            comparison_data.append((idx2, idx1))
+                
+                if len(comparison_data) == 0:
+                    st.error("No valid comparisons found for analysis.")
+                    st.stop()
+                
+                # Check graph connectivity
+                graph_analysis = _analyze_comparison_graph(test_ids, comparison_data)
+                
+                # Perform Bradley-Terry analysis
+                analysis_successful = False
+                try:
+                    params = choix.ilsr_pairwise(n_items, comparison_data, alpha=0.01)
+                    analysis_successful = True
+                    st.success("✅ Bradley-Terry analysis completed successfully!")
+                    
+                    # Compute enhanced statistics  
+                    try:
+                        bt_statistics = _compute_bradley_terry_statistics(n_items, comparison_data, params)
+                        cv_results = _compute_cross_validation_scores(n_items, comparison_data)
+                        inconsistency_results = _compute_inconsistency_metrics(comparison_data, test_ids)
+                    except Exception as stats_error:
+                        st.warning(f"Main analysis succeeded, but some advanced statistics failed: {stats_error}")
+                        bt_statistics = cv_results = inconsistency_results = None
+                    
+                except Exception as e:
+                    st.warning(f"Standard analysis failed ({e}), trying alternative method...")
+                    try:
+                        params = choix.ilsr_pairwise(n_items, comparison_data, alpha=0.1)
+                        analysis_successful = True
+                        st.success("✅ Bradley-Terry analysis completed successfully using alternative method!")
+                        bt_statistics = cv_results = inconsistency_results = None
+                    except Exception as fallback_error:
+                        try:
+                            params = choix.opt_pairwise(n_items, comparison_data, alpha=0.01)
+                            analysis_successful = True
+                            st.success("✅ Bradley-Terry analysis completed successfully using optimization method!")
+                            bt_statistics = cv_results = inconsistency_results = None
+                        except Exception as fallback_error:
+                            st.error(f"❌ All analysis methods failed: {fallback_error}")
+                            st.stop()
+                
+                if not analysis_successful:
+                    st.error("❌ Unable to perform any analysis. Please add more comparison data.")
+                    conn.close()
+                    st.stop()
+                
+                # Create results DataFrame
+                results_df = validated_tests.copy()
+                results_df['bt_score'] = [params[test_id_to_idx[test_id]] for test_id in results_df['test_id']]
+                
+                # Handle NaN values and sort
+                import pandas as pd
+                import numpy as np
+                results_df['bt_score'] = results_df['bt_score'].replace([np.inf, -np.inf], np.nan)
+                
+                # Separate analyzed and unanalyzed tests
+                analyzed_df = results_df.dropna(subset=['bt_score']).sort_values('bt_score', ascending=False)
+                unanalyzed_df = results_df[results_df['bt_score'].isna()]
+                
+                # Update bt_scores in database (only for non-NaN values)
+                for _, row in results_df.iterrows():
+                    if pd.notna(row['bt_score']):
+                        try:
+                            execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
+                                     (row['bt_score'], row['test_id']))
+                        except Exception as update_error:
+                            st.error(f"Failed to update bt_score for test_id {row['test_id']}: {update_error}")
+                
+                # Store analysis results in session state
+                st.session_state.analysis_results = {
+                    'analyzed_df': analyzed_df,
+                    'comparison_data': comparison_data,
+                    'graph_analysis': graph_analysis,
+                    'bt_statistics': bt_statistics if 'bt_statistics' in locals() else None,
+                    'cv_results': cv_results if 'cv_results' in locals() else None,
+                    'inconsistency_results': inconsistency_results if 'inconsistency_results' in locals() else None,
+                    'params': params if 'params' in locals() else None,
+                    'n_items': n_items
+                }
+                
+                # Store comparison count when analysis was run for out-of-date detection
+                st.session_state.analysis_comparisons_count = len(comparison_data)
+                
+                st.rerun()
+        
+        st.write("---")
+        
         # Show analysis results if they exist in session state
         if 'analysis_results' in st.session_state and st.session_state.analysis_results is not None:
             # Display the stored analysis results
@@ -1921,18 +2045,12 @@ if __name__ == "__main__":
                     'n_items': results_data.get('n_items')
                 }
                 _display_temporal_analysis_and_stats(analyzed_df, comparison_data, graph_analysis, enhanced_stats)
-            
-            # Button to clear results and run new analysis
-            if st.button("🔄 Run New Analysis"):
-                del st.session_state.analysis_results
-                if 'analysis_comparisons_count' in st.session_state:
-                    del st.session_state.analysis_comparisons_count
-                st.rerun()
         
-        elif st.button("Run Analysis"):
-            # Check if user has entered their name
-            if not can_user_proceed():
-                show_name_required_error()
+        else:
+            if validated_count < 2:
+                st.warning("Need at least 2 validated legal tests to run analysis.")
+            elif comparisons_count == 0:
+                st.warning("Need at least 1 pairwise comparison to run analysis.")
             
             conn = get_database_connection()
             try:
@@ -2197,8 +2315,13 @@ if __name__ == "__main__":
                 # Update bt_scores in database (only for non-NaN values)
                 for _, row in results_df.iterrows():
                     if pd.notna(row['bt_score']):
-                        execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
-                                 (row['bt_score'], row['test_id']))
+                        try:
+                            execute_sql("UPDATE legal_tests SET bt_score = ? WHERE test_id = ?", 
+                                     (row['bt_score'], row['test_id']))
+                        except Exception as update_error:
+                            st.error(f"Failed to update bt_score for test_id {row['test_id']}: {update_error}")
+                            import traceback
+                            st.text(f"Update error traceback: {traceback.format_exc()}")
                 
                 # Store analysis results in session state
                 st.session_state.analysis_results = {
