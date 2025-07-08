@@ -7,7 +7,7 @@ import scipy.stats
 import scipy.optimize
 from scipy.stats import chi2
 import time
-from config import get_database_connection, execute_sql, get_gemini_model, GEMINI_MODELS, list_available_models, save_api_key, load_api_key, delete_api_key, DEFAULT_MODEL
+from config import get_database_connection, execute_sql, get_gemini_model, GEMINI_MODELS, list_available_models, save_api_key, load_api_key, delete_api_key, DEFAULT_MODEL, DB_TYPE
 from schemas import ExtractedLegalTest, LegalTestComparison
 import google.generativeai as genai
 import statsmodels.api as sm
