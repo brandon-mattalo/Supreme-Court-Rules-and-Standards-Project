@@ -333,48 +333,56 @@ def _display_temporal_analysis_and_stats(analyzed_df, comparison_data, graph_ana
                 st.metric("Score Range", "", 
                          f"{analyzed_df['bt_score'].max() - analyzed_df['bt_score'].min():.3f}")
             
-            # Comprehensive Bradley-Terry Statistical Results
-            if st.checkbox("📊 **Show Comprehensive Bradley-Terry Statistical Results**", key="show_bt_stats"):
-                st.write("### Model Performance and Reliability")
-                
-                # Basic descriptive statistics
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**Descriptive Statistics:**")
-                    scores = analyzed_df['bt_score']
-                    st.write(f"• **Mean Score**: {scores.mean():.4f}")
-                    st.write(f"• **Median Score**: {scores.median():.4f}")
-                    st.write(f"• **Standard Deviation**: {scores.std():.4f}")
-                    st.write(f"• **Minimum Score**: {scores.min():.4f}")
-                    st.write(f"• **Maximum Score**: {scores.max():.4f}")
-                    st.write(f"• **Interquartile Range**: {scores.quantile(0.75) - scores.quantile(0.25):.4f}")
-                
-                with col2:
-                    st.write("**Model Characteristics:**")
-                    st.write(f"• **Total Comparisons**: {len(comparison_data)}")
-                    st.write(f"• **Tests Analyzed**: {len(analyzed_df)}")
-                    st.write(f"• **Graph Connectivity**: {'✅ Connected' if graph_analysis['is_connected'] else '❌ Disconnected'}")
-                    st.write(f"• **Connected Components**: {len(graph_analysis['components'])}")
+            # Comprehensive Bradley-Terry Statistical Results - as sub-section
+            st.write("---")
+            
+            # Create visual separation for sub-section
+            st.markdown("##### 📊 Statistical Analysis Section")
+            
+            # Use container with custom styling
+            stats_container = st.container(border=True)
+            with stats_container:
+                with st.expander("📊 **Show Comprehensive Bradley-Terry Statistical Results**"):
+                    st.write("### Model Performance and Reliability")
                     
-                    # Calculate comparison density
-                    max_possible = len(analyzed_df) * (len(analyzed_df) - 1) // 2
-                    density = len(comparison_data) / max_possible if max_possible > 0 else 0
-                    st.write(f"• **Comparison Density**: {density:.1%}")
+                    # Basic descriptive statistics
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**Descriptive Statistics:**")
+                        scores = analyzed_df['bt_score']
+                        st.write(f"• **Mean Score**: {scores.mean():.4f}")
+                        st.write(f"• **Median Score**: {scores.median():.4f}")
+                        st.write(f"• **Standard Deviation**: {scores.std():.4f}")
+                        st.write(f"• **Minimum Score**: {scores.min():.4f}")
+                        st.write(f"• **Maximum Score**: {scores.max():.4f}")
+                        st.write(f"• **Interquartile Range**: {scores.quantile(0.75) - scores.quantile(0.25):.4f}")
                     
-                    # Sparsity analysis
-                    if density < 0.1:
-                        sparsity_level = "Very Sparse"
-                    elif density < 0.3:
-                        sparsity_level = "Sparse"
-                    elif density < 0.7:
-                        sparsity_level = "Moderate"
-                    else:
-                        sparsity_level = "Dense"
-                    st.write(f"• **Data Sparsity**: {sparsity_level}")
+                    with col2:
+                        st.write("**Model Characteristics:**")
+                        st.write(f"• **Total Comparisons**: {len(comparison_data)}")
+                        st.write(f"• **Tests Analyzed**: {len(analyzed_df)}")
+                        st.write(f"• **Graph Connectivity**: {'✅ Connected' if graph_analysis['is_connected'] else '❌ Disconnected'}")
+                        st.write(f"• **Connected Components**: {len(graph_analysis['components'])}")
+                        
+                        # Calculate comparison density
+                        max_possible = len(analyzed_df) * (len(analyzed_df) - 1) // 2
+                        density = len(comparison_data) / max_possible if max_possible > 0 else 0
+                        st.write(f"• **Comparison Density**: {density:.1%}")
+                        
+                        # Sparsity analysis
+                        if density < 0.1:
+                            sparsity_level = "Very Sparse"
+                        elif density < 0.3:
+                            sparsity_level = "Sparse"
+                        elif density < 0.7:
+                            sparsity_level = "Moderate"
+                        else:
+                            sparsity_level = "Dense"
+                        st.write(f"• **Data Sparsity**: {sparsity_level}")
                 
-                # Enhanced Bradley-Terry Statistical Metrics
-                if enhanced_stats and enhanced_stats.get('bt_statistics'):
-                    bt_stats = enhanced_stats['bt_statistics']
+                    # Enhanced Bradley-Terry Statistical Metrics
+                    if enhanced_stats and enhanced_stats.get('bt_statistics'):
+                        bt_stats = enhanced_stats['bt_statistics']
                     
                     st.write("### Advanced Statistical Metrics")
                     
@@ -459,131 +467,129 @@ def _display_temporal_analysis_and_stats(analyzed_df, comparison_data, graph_ana
                             st.dataframe(inference_df, use_container_width=True)
                             st.caption("*** p<0.001, ** p<0.01, * p<0.05")
                 
-                # Cross-validation results
-                if enhanced_stats and enhanced_stats.get('cv_results'):
-                    cv_results = enhanced_stats['cv_results']
-                    st.write("### Cross-Validation Results")
+                    # Cross-validation results
+                    if enhanced_stats and enhanced_stats.get('cv_results'):
+                        cv_results = enhanced_stats['cv_results']
+                        st.write("### Cross-Validation Results")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Mean CV Accuracy", f"{cv_results['mean_accuracy']:.3f}")
+                        with col2:
+                            st.metric("CV Std Deviation", f"{cv_results['std_accuracy']:.3f}")
+                        with col3:
+                            st.metric("Number of Folds", str(len(cv_results['fold_accuracies'])))
                     
-                    col1, col2, col3 = st.columns(3)
+                        # Display individual fold accuracies
+                        fold_text = ", ".join([f"{acc:.3f}" for acc in cv_results['fold_accuracies']])
+                        st.write(f"**Individual fold accuracies**: {fold_text}")
+                
+                    # Inconsistency analysis
+                    if enhanced_stats and enhanced_stats.get('inconsistency_results'):
+                        inconsistency = enhanced_stats['inconsistency_results']
+                        st.write("### Transitivity and Consistency Analysis")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Triads", str(inconsistency['total_triads']))
+                        with col2:
+                            st.metric("Circular Triads", str(inconsistency['circular_triads']))
+                        with col3:
+                            st.metric("Inconsistency Rate", f"{inconsistency['inconsistency_rate']:.1%}")
+                    
+                        if inconsistency['circular_triads'] > 0:
+                            with st.expander("Show Examples of Circular Preferences"):
+                                for i, (a, b, c) in enumerate(inconsistency['circular_examples']):
+                                    if i < len(analyzed_df):
+                                        st.write(f"Circular triad {i+1}: Test indices {a} > {b} > {c} > {a}")
+                        else:
+                            st.success("✅ No circular preferences detected - perfectly transitive comparisons!")
+                
+                    # Score distribution analysis
+                    st.write("### Score Distribution Analysis")
+                
+                    # Create score distribution plot
+                    fig_hist, ax_hist = plt.subplots(figsize=(8, 4), dpi=100)
+                    ax_hist.hist(scores, bins=min(10, len(scores)//2), alpha=0.7, color='skyblue', edgecolor='black')
+                    ax_hist.set_xlabel("Rule-Likeness Score")
+                    ax_hist.set_ylabel("Frequency")
+                    ax_hist.set_title("Distribution of Rule-Likeness Scores")
+                    ax_hist.grid(True, alpha=0.3)
+                    
+                    # Add vertical lines for mean and median
+                    ax_hist.axvline(scores.mean(), color='red', linestyle='--', label=f'Mean: {scores.mean():.3f}')
+                    ax_hist.axvline(scores.median(), color='orange', linestyle='--', label=f'Median: {scores.median():.3f}')
+                    ax_hist.legend()
+                    
+                    st.pyplot(fig_hist)
+                
+                    # Statistical significance and confidence
+                    st.write("### Statistical Reliability")
+                    
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Mean CV Accuracy", f"{cv_results['mean_accuracy']:.3f}")
-                    with col2:
-                        st.metric("CV Std Deviation", f"{cv_results['std_accuracy']:.3f}")
-                    with col3:
-                        st.metric("Number of Folds", str(len(cv_results['fold_accuracies'])))
-                    
-                    # Display individual fold accuracies
-                    fold_text = ", ".join([f"{acc:.3f}" for acc in cv_results['fold_accuracies']])
-                    st.write(f"**Individual fold accuracies**: {fold_text}")
+                        st.write("**Confidence Intervals (Approximate):**")
+                        # Calculate approximate confidence intervals using normal approximation
+                        import scipy.stats as stats
+                        n = len(scores)
+                        se = scores.std() / np.sqrt(n)
+                        ci_95 = stats.t.interval(0.95, n-1, loc=scores.mean(), scale=se)
+                        ci_99 = stats.t.interval(0.99, n-1, loc=scores.mean(), scale=se)
+                        
+                        st.write(f"• **95% CI for Mean**: ({ci_95[0]:.4f}, {ci_95[1]:.4f})")
+                        st.write(f"• **99% CI for Mean**: ({ci_99[0]:.4f}, {ci_99[1]:.4f})")
+                        
+                        # Score reliability
+                        if len(scores) >= 30:
+                            reliability = "High (n≥30)"
+                        elif len(scores) >= 10:
+                            reliability = "Moderate (10≤n<30)"
+                        else:
+                            reliability = "Low (n<10)"
+                        st.write(f"• **Sample Size Reliability**: {reliability}")
                 
-                # Inconsistency analysis
-                if enhanced_stats and enhanced_stats.get('inconsistency_results'):
-                    inconsistency = enhanced_stats['inconsistency_results']
-                    st.write("### Transitivity and Consistency Analysis")
+                    with col2:
+                        st.write("**Model Convergence & Quality:**")
+                        
+                        # Check for score extremes that might indicate poor convergence
+                        extreme_scores = len(scores[(scores > 3) | (scores < -3)])
+                        st.write(f"• **Extreme Scores** (|score| > 3): {extreme_scores}")
+                        
+                        # Balance check
+                        positive_scores = len(scores[scores > 0])
+                        negative_scores = len(scores[scores < 0])
+                        zero_scores = len(scores[scores == 0])
+                        st.write(f"• **Positive Scores**: {positive_scores}")
+                        st.write(f"• **Negative Scores**: {negative_scores}")
+                        st.write(f"• **Zero Scores**: {zero_scores}")
+                        
+                        # Balance ratio
+                        if negative_scores > 0:
+                            balance_ratio = positive_scores / negative_scores
+                            st.write(f"• **Balance Ratio** (pos/neg): {balance_ratio:.2f}")
                     
-                    col1, col2, col3 = st.columns(3)
+                    # Ranking reliability
+                    st.write("### Ranking Analysis")
+                    
+                    # Calculate rank correlations and stability metrics
+                    ranks = scores.rank(ascending=False)
+                    
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Total Triads", str(inconsistency['total_triads']))
+                        st.write("**Top-Ranked Tests (Most Rule-Like):**")
+                        top_5 = analyzed_df.head(min(5, len(analyzed_df)))
+                        for i, (_, row) in enumerate(top_5.iterrows(), 1):
+                            st.write(f"{i}. **{row['case_name']}** ({row['bt_score']:.3f})")
+                    
                     with col2:
-                        st.metric("Circular Triads", str(inconsistency['circular_triads']))
-                    with col3:
-                        st.metric("Inconsistency Rate", f"{inconsistency['inconsistency_rate']:.1%}")
-                    
-                    if inconsistency['circular_triads'] > 0:
-                        if st.checkbox("Show Examples of Circular Preferences", key="show_circular_examples"):
-                            for i, (a, b, c) in enumerate(inconsistency['circular_examples']):
-                                if i < len(analyzed_df):
-                                    st.write(f"Circular triad {i+1}: Test indices {a} > {b} > {c} > {a}")
-                    else:
-                        st.success("✅ No circular preferences detected - perfectly transitive comparisons!")
+                        st.write("**Bottom-Ranked Tests (Most Standard-Like):**")
+                        bottom_5 = analyzed_df.tail(min(5, len(analyzed_df)))
+                        for i, (_, row) in enumerate(reversed(list(bottom_5.iterrows())), 1):
+                            rank = len(analyzed_df) - i + 1
+                            st.write(f"{rank}. **{row['case_name']}** ({row['bt_score']:.3f})")
                 
-                # Score distribution analysis
-                st.write("### Score Distribution Analysis")
-                
-                # Create score distribution plot
-                fig_hist, ax_hist = plt.subplots(figsize=(8, 4), dpi=100)
-                ax_hist.hist(scores, bins=min(10, len(scores)//2), alpha=0.7, color='skyblue', edgecolor='black')
-                ax_hist.set_xlabel("Rule-Likeness Score")
-                ax_hist.set_ylabel("Frequency")
-                ax_hist.set_title("Distribution of Rule-Likeness Scores")
-                ax_hist.grid(True, alpha=0.3)
-                
-                # Add vertical lines for mean and median
-                ax_hist.axvline(scores.mean(), color='red', linestyle='--', label=f'Mean: {scores.mean():.3f}')
-                ax_hist.axvline(scores.median(), color='orange', linestyle='--', label=f'Median: {scores.median():.3f}')
-                ax_hist.legend()
-                
-                st.pyplot(fig_hist)
-                
-                # Statistical significance and confidence
-                st.write("### Statistical Reliability")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**Confidence Intervals (Approximate):**")
-                    # Calculate approximate confidence intervals using normal approximation
-                    import scipy.stats as stats
-                    n = len(scores)
-                    se = scores.std() / np.sqrt(n)
-                    ci_95 = stats.t.interval(0.95, n-1, loc=scores.mean(), scale=se)
-                    ci_99 = stats.t.interval(0.99, n-1, loc=scores.mean(), scale=se)
-                    
-                    st.write(f"• **95% CI for Mean**: ({ci_95[0]:.4f}, {ci_95[1]:.4f})")
-                    st.write(f"• **99% CI for Mean**: ({ci_99[0]:.4f}, {ci_99[1]:.4f})")
-                    
-                    # Score reliability
-                    if len(scores) >= 30:
-                        reliability = "High (n≥30)"
-                    elif len(scores) >= 10:
-                        reliability = "Moderate (10≤n<30)"
-                    else:
-                        reliability = "Low (n<10)"
-                    st.write(f"• **Sample Size Reliability**: {reliability}")
-                
-                with col2:
-                    st.write("**Model Convergence & Quality:**")
-                    
-                    # Check for score extremes that might indicate poor convergence
-                    extreme_scores = len(scores[(scores > 3) | (scores < -3)])
-                    st.write(f"• **Extreme Scores** (|score| > 3): {extreme_scores}")
-                    
-                    # Balance check
-                    positive_scores = len(scores[scores > 0])
-                    negative_scores = len(scores[scores < 0])
-                    zero_scores = len(scores[scores == 0])
-                    st.write(f"• **Positive Scores**: {positive_scores}")
-                    st.write(f"• **Negative Scores**: {negative_scores}")
-                    st.write(f"• **Zero Scores**: {zero_scores}")
-                    
-                    # Balance ratio
-                    if negative_scores > 0:
-                        balance_ratio = positive_scores / negative_scores
-                        st.write(f"• **Balance Ratio** (pos/neg): {balance_ratio:.2f}")
-                
-                # Ranking reliability
-                st.write("### Ranking Analysis")
-                
-                # Calculate rank correlations and stability metrics
-                ranks = scores.rank(ascending=False)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**Top-Ranked Tests (Most Rule-Like):**")
-                    top_5 = analyzed_df.head(min(5, len(analyzed_df)))
-                    for i, (_, row) in enumerate(top_5.iterrows(), 1):
-                        st.write(f"{i}. **{row['case_name']}** ({row['bt_score']:.3f})")
-                
-                with col2:
-                    st.write("**Bottom-Ranked Tests (Most Standard-Like):**")
-                    bottom_5 = analyzed_df.tail(min(5, len(analyzed_df)))
-                    for i, (_, row) in enumerate(reversed(list(bottom_5.iterrows())), 1):
-                        rank = len(analyzed_df) - i + 1
-                        st.write(f"{rank}. **{row['case_name']}** ({row['bt_score']:.3f})")
-                
-                # Provide explanations for each statistic
-                st.write("### Statistical Explanations")
-                
-                if st.checkbox("📖 **Show Statistical Explanations**", key="show_explanations"):
+                with st.expander("📖 **Show Statistical Explanations**"):
+                    st.write("### Statistical Explanations")
                     st.write("""
                     **Bradley-Terry Model Basics:**
                     - The Bradley-Terry model estimates the probability that one item beats another in pairwise comparisons
@@ -1778,158 +1784,178 @@ if __name__ == "__main__":
                         st.info("No remaining pairs to compare.")
             # Comparison Review Table - as collapsible subsection
             st.write("---")
-            review_status = f"📊 {comparisons_count} comparisons" if comparisons_count > 0 else "📋 No comparisons yet"
-            if st.checkbox(f"**Review Completed Comparisons** - {review_status}", key="show_comparison_review", value=(comparisons_count > 0 and comparisons_count <= 10)):
-                if comparisons_count == 0:
-                    st.info("No comparisons completed yet. Complete some comparisons above to see them here.")
-                else:
-                    # Get all completed comparisons with cached data
-                    completed_comparisons = get_completed_comparisons()
-                    
-                    if not completed_comparisons.empty:
-                        st.write(f"**{len(completed_comparisons)} completed comparisons:**")
-                        
-                        # Pagination for comparisons
-                        comp_items_per_page = st.selectbox("Comparisons per page:", [5, 10, 20], index=1, key="comparison_pagination")
-                        comp_total_pages = (len(completed_comparisons) + comp_items_per_page - 1) // comp_items_per_page
-                        
-                        if comp_total_pages > 1:
-                            # Enhanced pagination with arrows for comparisons
-                            col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
-                            
-                            # Get current page from session state
-                            if 'comparison_current_page' not in st.session_state:
-                                st.session_state.comparison_current_page = 0
-                            
-                            comp_current_page = st.session_state.comparison_current_page
-                            
-                            with col1:
-                                if st.button("◀️ Prev", key="comparison_prev", disabled=(comp_current_page == 0)):
-                                    st.session_state.comparison_current_page = max(0, comp_current_page - 1)
-                                    st.rerun()
-                            
-                            with col2:
-                                st.write(f"Page {comp_current_page + 1}")
-                            
-                            with col3:
-                                selected_comp_page = st.selectbox("Go to:", range(1, comp_total_pages + 1), 
-                                                                 index=comp_current_page, key="comparison_page_select") - 1
-                                if selected_comp_page != comp_current_page:
-                                    st.session_state.comparison_current_page = selected_comp_page
-                                    st.rerun()
-                            
-                            with col4:
-                                st.write(f"of {comp_total_pages}")
-                            
-                            with col5:
-                                if st.button("Next ▶️", key="comparison_next", disabled=(comp_current_page >= comp_total_pages - 1)):
-                                    st.session_state.comparison_current_page = min(comp_total_pages - 1, comp_current_page + 1)
-                                    st.rerun()
-                            
-                            comp_page = comp_current_page
+            
+            # Create visual separation for sub-section
+            st.markdown("##### 📂 Review Section")
+            
+            # Use container with custom styling
+            review_container = st.container(border=True)
+            with review_container:
+                review_status = f"📊 {comparisons_count} comparisons" if comparisons_count > 0 else "📋 No comparisons yet"
+                
+                with st.expander(f"**Review Completed Comparisons** - {review_status}", expanded=(comparisons_count > 0 and comparisons_count <= 10)):
+                        if comparisons_count == 0:
+                            st.info("No comparisons completed yet. Complete some comparisons above to see them here.")
                         else:
-                            comp_page = 0
-                            if 'comparison_current_page' in st.session_state:
-                                del st.session_state.comparison_current_page
+                            # Get all completed comparisons with cached data
+                            completed_comparisons = get_completed_comparisons()
                         
-                        # Get page data
-                        comp_start_idx = comp_page * comp_items_per_page
-                        comp_end_idx = comp_start_idx + comp_items_per_page
-                        comp_page_df = completed_comparisons.iloc[comp_start_idx:comp_end_idx]
-                        
-                        for idx, comp in comp_page_df.iterrows():
-                            with st.container():
-                                st.divider()
-                            
-                            # Header with comparison info
-                            col_header1, col_header2, col_header3 = st.columns([3, 1, 1])
-                            with col_header1:
-                                st.write(f"**Comparison #{comp['comparison_id']}** - {comp['comparison_method'].title()}")
-                            with col_header2:
-                                timestamp_display = str(comp['timestamp'])[:10] if comp['timestamp'] else "Unknown"
-                                st.write(f"*{timestamp_display}*")
-                            with col_header3:
-                                method_emoji = "🤖" if comp['comparison_method'] == 'ai_generated' else "👤"
-                                st.write(f"{method_emoji} {comp['comparator_name']}")
-                            
-                            # Test comparison details
-                            col1, col2, col3 = st.columns([2, 2, 1])
-                            
+                        if not completed_comparisons.empty:
+                            col1, col2 = st.columns([3, 1])
                             with col1:
-                                st.write("**📋 Test A:**")
-                                st.write(f"*{comp['case1_name']}* ({comp['case1_year']})")
-                                st.write(f"Citation: {comp['case1_citation']}")
-                                
-                                # Show full test summary for Test A
-                                st.write(f"**Test:** {comp['test1_summary']}")
-                            
+                                st.write(f"**{len(completed_comparisons)} completed comparisons:**")
                             with col2:
-                                st.write("**📋 Test B:**")
-                                st.write(f"*{comp['case2_name']}* ({comp['case2_year']})")
-                                st.write(f"Citation: {comp['case2_citation']}")
+                                # Export to CSV button
+                                csv = completed_comparisons.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Export to CSV",
+                                    data=csv,
+                                    file_name="pairwise_comparisons.csv",
+                                    mime="text/csv",
+                                    key="download_comparisons_csv"
+                                )
+                            
+                            # Pagination for comparisons
+                            comp_items_per_page = st.selectbox("Comparisons per page:", [5, 10, 20], index=1, key="comparison_pagination")
+                            comp_total_pages = (len(completed_comparisons) + comp_items_per_page - 1) // comp_items_per_page
+                        
+                            if comp_total_pages > 1:
+                                # Enhanced pagination with arrows for comparisons
+                                col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
+                            
+                                # Get current page from session state
+                                if 'comparison_current_page' not in st.session_state:
+                                    st.session_state.comparison_current_page = 0
                                 
-                                # Show full test summary for Test B
-                                st.write(f"**Test:** {comp['test2_summary']}")
-                            
-                            with col3:
-                                st.write("**🏆 Winner:**")
-                                st.success(f"**{comp['winner_name']}**")
-                                st.write("*More Rule-Like*")
-                            
-                            # Reasoning
-                            st.write("**💭 Reasoning:**")
-                            st.write(f"*{comp['reasoning']}*")
-                            
-                            # Validation actions (only for AI comparisons)
-                            if comp['comparison_method'] == 'ai_generated':
-                                st.write("**Validate AI Comparison:**")
-                                col_val1, col_val2, col_val3 = st.columns(3)
+                                comp_current_page = st.session_state.comparison_current_page
                                 
-                                with col_val1:
-                                    if st.button("✅ Approve", key=f"approve_{comp['comparison_id']}"):
-                                        # Mark as human validated (could add a validation_status column)
-                                        execute_sql("UPDATE legal_test_comparisons SET comparator_name = ? WHERE comparison_id = ?", 
-                                                 (f"{comp['comparator_name']} (Validated)", comp['comparison_id']))
-                                        st.success("Comparison approved!")
+                                with col1:
+                                    if st.button("◀️ Prev", key="comparison_prev", disabled=(comp_current_page == 0)):
+                                        st.session_state.comparison_current_page = max(0, comp_current_page - 1)
                                         st.rerun()
                                 
-                                with col_val2:
-                                    if st.button("❌ Override", key=f"override_{comp['comparison_id']}"):
-                                        st.session_state[f'overriding_comparison_{comp["comparison_id"]}'] = True
+                                with col2:
+                                    st.write(f"Page {comp_current_page + 1}")
+                                
+                                with col3:
+                                    selected_comp_page = st.selectbox("Go to:", range(1, comp_total_pages + 1), 
+                                                                     index=comp_current_page, key="comparison_page_select") - 1
+                                    if selected_comp_page != comp_current_page:
+                                        st.session_state.comparison_current_page = selected_comp_page
                                         st.rerun()
                                 
-                                with col_val3:
-                                    if st.button("🗑️ Delete", key=f"delete_{comp['comparison_id']}"):
-                                        execute_sql("DELETE FROM legal_test_comparisons WHERE comparison_id = ?", (comp['comparison_id'],))
-                                        st.success("Comparison deleted!")
+                                with col4:
+                                    st.write(f"of {comp_total_pages}")
+                                
+                                with col5:
+                                    if st.button("Next ▶️", key="comparison_next", disabled=(comp_current_page >= comp_total_pages - 1)):
+                                        st.session_state.comparison_current_page = min(comp_total_pages - 1, comp_current_page + 1)
                                         st.rerun()
                                 
-                                # Handle override mode
-                                if st.session_state.get(f'overriding_comparison_{comp["comparison_id"]}', False):
-                                    st.write("**Override this comparison:**")
+                                comp_page = comp_current_page
+                            else:
+                                comp_page = 0
+                                if 'comparison_current_page' in st.session_state:
+                                    del st.session_state.comparison_current_page
+                        
+                            # Get page data
+                            comp_start_idx = comp_page * comp_items_per_page
+                            comp_end_idx = comp_start_idx + comp_items_per_page
+                            comp_page_df = completed_comparisons.iloc[comp_start_idx:comp_end_idx]
+                            
+                            for idx, comp in comp_page_df.iterrows():
+                                with st.container():
+                                    st.divider()
+                            
+                                # Header with comparison info
+                                col_header1, col_header2, col_header3 = st.columns([3, 1, 1])
+                                with col_header1:
+                                    st.write(f"**Comparison #{comp['comparison_id']}** - {comp['comparison_method'].title()}")
+                                with col_header2:
+                                    timestamp_display = str(comp['timestamp'])[:10] if comp['timestamp'] else "Unknown"
+                                    st.write(f"*{timestamp_display}*")
+                                with col_header3:
+                                    method_emoji = "🤖" if comp['comparison_method'] == 'ai_generated' else "👤"
+                                    st.write(f"{method_emoji} {comp['comparator_name']}")
+                            
+                                # Test comparison details
+                                col1, col2, col3 = st.columns([2, 2, 1])
+                            
+                                with col1:
+                                    st.write("**📋 Test A:**")
+                                    st.write(f"*{comp['case1_name']}* ({comp['case1_year']})")
+                                    st.write(f"Citation: {comp['case1_citation']}")
                                     
-                                    # Determine which test should win instead
-                                    other_test_id = comp['test_id_2'] if comp['more_rule_like_test_id'] == comp['test_id_1'] else comp['test_id_1']
-                                    other_test_name = comp['case2_name'] if comp['more_rule_like_test_id'] == comp['test_id_1'] else comp['case1_name']
+                                    # Show full test summary for Test A
+                                    st.write(f"**Test:** {comp['test1_summary']}")
+                            
+                                with col2:
+                                    st.write("**📋 Test B:**")
+                                    st.write(f"*{comp['case2_name']}* ({comp['case2_year']})")
+                                    st.write(f"Citation: {comp['case2_citation']}")
                                     
-                                    new_reasoning = st.text_area("New reasoning:", key=f"new_reason_{comp['comparison_id']}")
-                                    
-                                    col_override1, col_override2 = st.columns(2)
-                                    with col_override1:
-                                        if st.button(f"Make {other_test_name} Winner", key=f"flip_{comp['comparison_id']}") and new_reasoning.strip():
-                                            execute_sql("""UPDATE legal_test_comparisons 
-                                                       SET more_rule_like_test_id = ?, reasoning = ?, 
-                                                           comparator_name = ?, comparison_method = 'human_override' 
-                                                       WHERE comparison_id = ?""", 
-                                                     (other_test_id, new_reasoning, st.session_state.get('validator_name', 'Human'), comp['comparison_id']))
-                                            del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
-                                            st.success("Comparison updated!")
+                                    # Show full test summary for Test B
+                                    st.write(f"**Test:** {comp['test2_summary']}")
+                            
+                                with col3:
+                                    st.write("**🏆 Winner:**")
+                                    st.success(f"**{comp['winner_name']}**")
+                                    st.write("*More Rule-Like*")
+                            
+                                # Reasoning
+                                st.write("**💭 Reasoning:**")
+                                st.write(f"*{comp['reasoning']}*")
+                            
+                                # Validation actions (only for AI comparisons)
+                                if comp['comparison_method'] == 'ai_generated':
+                                    st.write("**Validate AI Comparison:**")
+                                    col_val1, col_val2, col_val3 = st.columns(3)
+                                
+                                    with col_val1:
+                                        if st.button("✅ Approve", key=f"approve_{comp['comparison_id']}"):
+                                            # Mark as human validated (could add a validation_status column)
+                                            execute_sql("UPDATE legal_test_comparisons SET comparator_name = ? WHERE comparison_id = ?", 
+                                                     (f"{comp['comparator_name']} (Validated)", comp['comparison_id']))
+                                            st.success("Comparison approved!")
                                             st.rerun()
                                     
-                                    with col_override2:
-                                        if st.button("Cancel Override", key=f"cancel_{comp['comparison_id']}"):
-                                            del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
-                                        st.rerun()
+                                    with col_val2:
+                                        if st.button("❌ Override", key=f"override_{comp['comparison_id']}"):
+                                            st.session_state[f'overriding_comparison_{comp["comparison_id"]}'] = True
+                                            st.rerun()
+                                    
+                                    with col_val3:
+                                        if st.button("🗑️ Delete", key=f"delete_{comp['comparison_id']}"):
+                                            execute_sql("DELETE FROM legal_test_comparisons WHERE comparison_id = ?", (comp['comparison_id'],))
+                                            st.success("Comparison deleted!")
+                                            st.rerun()
+                                
+                                    # Handle override mode
+                                    if st.session_state.get(f'overriding_comparison_{comp["comparison_id"]}', False):
+                                        st.write("**Override this comparison:**")
+                                        
+                                        # Determine which test should win instead
+                                        other_test_id = comp['test_id_2'] if comp['more_rule_like_test_id'] == comp['test_id_1'] else comp['test_id_1']
+                                        other_test_name = comp['case2_name'] if comp['more_rule_like_test_id'] == comp['test_id_1'] else comp['case1_name']
+                                        
+                                        new_reasoning = st.text_area("New reasoning:", key=f"new_reason_{comp['comparison_id']}")
+                                        
+                                        col_override1, col_override2 = st.columns(2)
+                                        with col_override1:
+                                            if st.button(f"Make {other_test_name} Winner", key=f"flip_{comp['comparison_id']}") and new_reasoning.strip():
+                                                execute_sql("""UPDATE legal_test_comparisons 
+                                                           SET more_rule_like_test_id = ?, reasoning = ?, 
+                                                               comparator_name = ?, comparison_method = 'human_override' 
+                                                           WHERE comparison_id = ?""", 
+                                                         (other_test_id, new_reasoning, st.session_state.get('validator_name', 'Human'), comp['comparison_id']))
+                                                del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
+                                                st.success("Comparison updated!")
+                                                st.rerun()
+                                        
+                                        with col_override2:
+                                            if st.button("Cancel Override", key=f"cancel_{comp['comparison_id']}"):
+                                                del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
+                                                st.rerun()
 
     # Section 6: Analysis
     # Determine analysis status with out-of-date detection
@@ -2424,7 +2450,7 @@ if __name__ == "__main__":
                 st.write("• Invalid data in comparison database")
                 
                 # Enhanced debug information
-                if st.checkbox("🔍 **Show Detailed Debug Information**", key="show_debug_info"):
+                with st.expander("🔍 **Show Detailed Debug Information**"):
                     st.write("**Data Overview:**")
                     col1, col2, col3 = st.columns(3)
                     with col1:
