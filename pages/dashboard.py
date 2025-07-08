@@ -476,7 +476,7 @@ def show_experiment_comparison():
         LEFT JOIN experiment_runs er ON e.experiment_id = er.experiment_id
         WHERE e.status IN ('active', 'completed') 
         GROUP BY e.experiment_id, e.name, e.ai_model, e.temperature, e.extraction_strategy
-        HAVING run_count > 0
+        HAVING COUNT(er.run_id) > 0
         ORDER BY e.modified_date DESC
     """, fetch=True)
     
