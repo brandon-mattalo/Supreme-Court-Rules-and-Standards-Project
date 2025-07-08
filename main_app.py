@@ -1466,16 +1466,23 @@ if __name__ == "__main__":
             conn = get_database_connection()
             try:
                 existing_comparisons = pd.read_sql("SELECT COUNT(*) as count FROM legal_test_comparisons", conn).iloc[0]['count']
-            total_possible = len(validated_tests) * (len(validated_tests) - 1) // 2
+                total_possible = len(validated_tests) * (len(validated_tests) - 1) // 2
+                
+                # Get compared pairs if needed
+                if existing_comparisons < total_possible:
+                    compared_pairs = pd.read_sql("""
+                        SELECT test_id_1, test_id_2 FROM legal_test_comparisons
+                        UNION
+                        SELECT test_id_2 as test_id_1, test_id_1 as test_id_2 FROM legal_test_comparisons
+                    """, conn)
+                else:
+                    compared_pairs = pd.DataFrame()
+            finally:
+                conn.close()
+            
             st.metric("Comparisons Completed", f"{existing_comparisons}/{total_possible}")
             
             if existing_comparisons < total_possible:
-                # Get next pair to compare
-                compared_pairs = pd.read_sql("""
-                    SELECT test_id_1, test_id_2 FROM legal_test_comparisons
-                    UNION
-                    SELECT test_id_2 as test_id_1, test_id_1 as test_id_2 FROM legal_test_comparisons
-                """, conn)
                 
                 # Find first uncompared pair
                 next_pair = None
@@ -1861,8 +1868,6 @@ if __name__ == "__main__":
                                         if st.button("Cancel Override", key=f"cancel_{comp['comparison_id']}"):
                                             del st.session_state[f'overriding_comparison_{comp["comparison_id"]}']
                                         st.rerun()
-            finally:
-                conn.close()
 
     # Section 6: Analysis
     # Determine analysis status with out-of-date detection

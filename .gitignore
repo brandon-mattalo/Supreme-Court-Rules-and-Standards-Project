@@ -187,6 +187,17 @@ parquet/
 *.db-wal
 *.db-shm
 
+# Large data files
+*.parquet
+*.csv
+data/
+datasets/
+
+# Excel files (exclude large data files, but keep essential config files)
+# *.xlsx
+# *.xls
+# If you need to exclude large Excel files later, add them individually
+
 # API keys and sensitive data
 .api_key.json
 *.key
