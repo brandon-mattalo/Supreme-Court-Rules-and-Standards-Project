@@ -11,7 +11,19 @@ import tempfile
 load_dotenv()
 
 # Database configuration with environment-based selection
-DATABASE_URL = os.getenv('DATABASE_URL')
+# Try Streamlit secrets first (for Streamlit Cloud), then environment variable
+DATABASE_URL = None
+try:
+    # First try Streamlit secrets
+    if hasattr(st, 'secrets') and 'DATABASE_URL' in st.secrets:
+        DATABASE_URL = st.secrets['DATABASE_URL']
+except:
+    pass
+
+# If not found in secrets, try environment variable
+if not DATABASE_URL:
+    DATABASE_URL = os.getenv('DATABASE_URL')
+
 if DATABASE_URL:
     # Production: Use PostgreSQL (Neon)
     DB_ENGINE = create_engine(DATABASE_URL)
