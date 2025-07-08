@@ -194,7 +194,7 @@ def show_experiment_configuration():
         col1, col2 = st.columns(2)
         
         with col1:
-            name = st.text_input("Experiment Name", value=exp['name'], required=True)
+            name = st.text_input("Experiment Name", value=exp['name'])
             status = st.selectbox("Status", ['draft', 'active', 'completed', 'archived'], 
                                 index=['draft', 'active', 'completed', 'archived'].index(exp['status']))
         
@@ -243,13 +243,14 @@ def show_experiment_configuration():
         with col2:
             if editing_id and st.form_submit_button("📋 Clone Experiment"):
                 # Create a copy of the experiment
-                new_name = f"{name}_copy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                save_experiment(None, new_name, description, status, ai_model, temperature, 
-                               top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
-                               comparison_prompt, system_instruction, cost_limit)
-                st.success(f"Experiment cloned as '{new_name}'!")
-                st.session_state.editing_experiment = None
-                st.rerun()
+                base_name = name if name and name.strip() else "Unnamed_Experiment"
+                new_name = f"{base_name}_copy_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                if save_experiment(None, new_name, description, status, ai_model, temperature, 
+                                  top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
+                                  comparison_prompt, system_instruction, cost_limit):
+                    st.success(f"Experiment cloned as '{new_name}'!")
+                    st.session_state.editing_experiment = None
+                    st.rerun()
         
         with col3:
             if st.form_submit_button("❌ Cancel"):
@@ -257,12 +258,16 @@ def show_experiment_configuration():
                 st.rerun()
         
         if submitted:
-            if save_experiment(editing_id, name, description, status, ai_model, temperature,
-                             top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
-                             comparison_prompt, system_instruction, cost_limit):
-                st.success("Experiment saved successfully!")
-                st.session_state.editing_experiment = None
-                st.rerun()
+            # Validate required fields
+            if not name or not name.strip():
+                st.error("Experiment name is required!")
+            else:
+                if save_experiment(editing_id, name, description, status, ai_model, temperature,
+                                 top_p, top_k, max_tokens, extraction_strategy, extraction_prompt,
+                                 comparison_prompt, system_instruction, cost_limit):
+                    st.success("Experiment saved successfully!")
+                    st.session_state.editing_experiment = None
+                    st.rerun()
 
 def save_experiment(experiment_id, name, description, status, ai_model, temperature, top_p, 
                    top_k, max_tokens, extraction_strategy, extraction_prompt, 
