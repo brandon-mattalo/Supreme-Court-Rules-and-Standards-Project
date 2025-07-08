@@ -42,11 +42,13 @@ pip install -r requirements.txt
 
 ### Core Components
 
-- **app.py**: Main application entry point with settings management and navigation
+- **app.py**: Main application entry point with settings management and navigation  
 - **pages/dashboard.py**: Core dashboard interface with experiment management, data loading, and analysis features
+- **pages/experiment_execution.py**: Experiment execution interface for running extractions and comparisons
 - **bulk_processor.py**: Command-line tool for batch processing cases without the web interface
 - **config.py**: Configuration management including API keys, model settings, and database path
 - **schemas.py**: Pydantic models for data validation (ExtractedLegalTest, LegalTestComparison)
+- **utils/case_management.py**: Database operations and case management utilities
 
 ### Database Schema
 
