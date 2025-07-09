@@ -7,17 +7,42 @@ import streamlit as st
 import pandas as pd
 from config import execute_sql
 
-def calculate_bradley_terry_comparisons(n_cases):
+def calculate_bradley_terry_comparisons(n_cases=None):
     """
-    Calculate required number of comparisons using Bradley-Terry linked block design
+    Calculate required number of comparisons using Bradley-Terry linked block design.
+    Now uses actual block structure when available.
     
     Parameters:
-    - n_cases: Total number of cases
+    - n_cases: Total number of cases (optional, will use actual structure if available)
     
     Returns:
     - required_comparisons: Number of comparisons needed for Bradley-Terry analysis
     """
-    if n_cases <= 0:
+    # Try to use actual block structure first
+    try:
+        structure = get_bradley_terry_structure()
+        if structure:
+            # Calculate exact comparisons from actual block structure
+            blocks = {}
+            for case in structure:
+                block_num = case['block_number']
+                if block_num not in blocks:
+                    blocks[block_num] = []
+                blocks[block_num].append(case['case_id'])
+            
+            total_comparisons = 0
+            for block_cases in blocks.values():
+                block_size = len(block_cases)
+                block_comparisons = (block_size * (block_size - 1)) // 2
+                total_comparisons += block_comparisons
+            
+            return total_comparisons
+    except:
+        # Fall back to mathematical calculation if structure unavailable
+        pass
+    
+    # Fallback: Mathematical calculation based on n_cases
+    if n_cases is None or n_cases <= 0:
         return 0
     
     # Bradley-Terry parameters
@@ -517,3 +542,472 @@ def remove_cases_from_experiments(case_ids):
     except Exception as e:
         st.error(f"Error in batch case removal: {e}")
         return 0
+
+def calculate_case_importance_scores():
+    """
+    Calculate importance scores for all selected cases based on multiple factors:
+    - Citation frequency (how often this case is referenced)
+    - Temporal significance (recent landmark cases vs older foundational cases)
+    - Area of law breadth (cases covering important/broad legal areas)
+    - Case length (longer cases often contain more comprehensive legal analysis)
+    
+    Returns: dict {case_id: importance_score}
+    """
+    try:
+        # Get all selected cases with their metadata
+        selected_cases = execute_sql("""
+            SELECT c.case_id, c.case_name, c.citation, c.decision_year, 
+                   c.area_of_law, c.subject, c.case_length, c.case_text
+            FROM v2_cases c
+            JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
+            ORDER BY c.case_id
+        """, fetch=True)
+        
+        if not selected_cases:
+            return {}
+        
+        importance_scores = {}
+        
+        # Convert to easier processing format
+        cases_data = []
+        for row in selected_cases:
+            case_id, name, citation, year, area, subject, length, text = row
+            cases_data.append({
+                'case_id': case_id,
+                'name': name or '',
+                'citation': citation or '',
+                'year': year or 2020,
+                'area': area or '',
+                'subject': subject or '',
+                'length': length or 0,
+                'text': text or ''
+            })
+        
+        # Calculate citation frequency scores
+        citation_scores = _calculate_citation_scores(cases_data)
+        
+        # Calculate temporal significance scores  
+        temporal_scores = _calculate_temporal_scores(cases_data)
+        
+        # Calculate area of law importance scores
+        area_scores = _calculate_area_scores(cases_data)
+        
+        # Calculate case length scores (normalized)
+        length_scores = _calculate_length_scores(cases_data)
+        
+        # Combine scores with weights
+        weights = {
+            'citation': 0.4,    # Citation frequency is most important
+            'temporal': 0.2,    # Temporal significance
+            'area': 0.25,       # Area importance  
+            'length': 0.15      # Case comprehensiveness
+        }
+        
+        for case in cases_data:
+            case_id = case['case_id']
+            
+            # Weighted combination of all factors
+            combined_score = (
+                weights['citation'] * citation_scores.get(case_id, 0.0) +
+                weights['temporal'] * temporal_scores.get(case_id, 0.0) +
+                weights['area'] * area_scores.get(case_id, 0.0) +
+                weights['length'] * length_scores.get(case_id, 0.0)
+            )
+            
+            importance_scores[case_id] = round(combined_score, 4)
+        
+        return importance_scores
+    
+    except Exception as e:
+        st.error(f"Error calculating case importance scores: {e}")
+        return {}
+
+def _calculate_citation_scores(cases_data):
+    """Calculate citation frequency scores by counting case name/citation references"""
+    citation_scores = {}
+    
+    # Create searchable terms for each case
+    case_terms = {}
+    for case in cases_data:
+        # Extract key terms from case name and citation
+        terms = []
+        if case['name']:
+            # Get main parties (before 'v.' or 'vs.' or 'c.')
+            name_parts = case['name'].replace(' v. ', ' vs. ').replace(' c. ', ' vs. ').split(' vs. ')
+            if len(name_parts) >= 2:
+                terms.extend([part.strip() for part in name_parts[:2]])
+        
+        if case['citation']:
+            # Add citation components
+            terms.append(case['citation'].strip())
+        
+        case_terms[case['case_id']] = terms
+    
+    # Count references to each case in other cases' text
+    for target_case in cases_data:
+        target_id = target_case['case_id']
+        reference_count = 0
+        
+        target_terms = case_terms.get(target_id, [])
+        
+        # Search for this case's terms in all other cases' text
+        for other_case in cases_data:
+            if other_case['case_id'] == target_id:
+                continue
+                
+            other_text = (other_case['text'] or '').lower()
+            
+            # Count how many times this case is referenced
+            for term in target_terms:
+                if term and len(term) > 3:  # Avoid matching very short terms
+                    term_lower = term.lower()
+                    reference_count += other_text.count(term_lower)
+        
+        # Normalize score (0-1 scale)
+        max_possible_refs = len(cases_data) * 5  # Rough estimate
+        citation_scores[target_id] = min(reference_count / max_possible_refs, 1.0) if max_possible_refs > 0 else 0.0
+    
+    return citation_scores
+
+def _calculate_temporal_scores(cases_data):
+    """Calculate temporal significance scores - recent cases and landmark older cases get higher scores"""
+    temporal_scores = {}
+    
+    years = [case['year'] for case in cases_data if case['year']]
+    if not years:
+        return {case['case_id']: 0.5 for case in cases_data}
+    
+    min_year = min(years)
+    max_year = max(years) 
+    year_range = max_year - min_year if max_year > min_year else 1
+    
+    for case in cases_data:
+        year = case['year']
+        case_id = case['case_id']
+        
+        if not year:
+            temporal_scores[case_id] = 0.5
+            continue
+        
+        # Recent cases (last 10 years) get high scores
+        years_old = max_year - year
+        if years_old <= 10:
+            temporal_scores[case_id] = 1.0 - (years_old / 20)  # Scale from 1.0 to 0.5
+        else:
+            # Older cases - give higher scores to landmark older cases
+            # Assume cases from key decades are more important
+            decade = (year // 10) * 10
+            landmark_decades = [1980, 1990, 2000, 2010]  # Adjust as needed
+            
+            if decade in landmark_decades:
+                temporal_scores[case_id] = 0.7
+            else:
+                # Linear decay for very old cases
+                temporal_scores[case_id] = max(0.1, 1.0 - (years_old / year_range))
+    
+    return temporal_scores
+
+def _calculate_area_scores(cases_data):
+    """Calculate area of law importance scores - broader/more fundamental areas get higher scores"""
+    area_scores = {}
+    
+    # Define importance weights for different areas of law
+    area_weights = {
+        'constitutional': 1.0,
+        'charter': 1.0,
+        'criminal': 0.9,
+        'contract': 0.8,
+        'tort': 0.8,
+        'property': 0.8,
+        'administrative': 0.7,
+        'family': 0.6,
+        'employment': 0.6,
+        'tax': 0.5,
+        'immigration': 0.5,
+        'default': 0.5
+    }
+    
+    for case in cases_data:
+        case_id = case['case_id']
+        area = (case['area'] or '').lower()
+        
+        # Find matching area weight
+        score = area_weights['default']
+        for area_key, weight in area_weights.items():
+            if area_key in area:
+                score = weight
+                break
+        
+        area_scores[case_id] = score
+    
+    return area_scores
+
+def _calculate_length_scores(cases_data):
+    """Calculate normalized case length scores - longer cases often contain more comprehensive analysis"""
+    length_scores = {}
+    
+    lengths = [case['length'] for case in cases_data if case['length'] and case['length'] > 0]
+    
+    if not lengths:
+        return {case['case_id']: 0.5 for case in cases_data}
+    
+    min_length = min(lengths)
+    max_length = max(lengths)
+    length_range = max_length - min_length if max_length > min_length else 1
+    
+    for case in cases_data:
+        case_id = case['case_id']
+        length = case['length'] or 0
+        
+        if length <= 0:
+            length_scores[case_id] = 0.2  # Short/missing cases get low score
+        else:
+            # Normalize to 0-1 scale, with slight preference for longer cases
+            normalized = (length - min_length) / length_range
+            # Apply logarithmic scaling to avoid over-weighting extremely long cases
+            import math
+            length_scores[case_id] = min(0.9, 0.3 + 0.6 * math.log(1 + normalized))
+    
+    return length_scores
+
+def generate_bradley_terry_structure(force_regenerate=False):
+    """
+    Generate the canonical Bradley-Terry block structure for all selected cases.
+    
+    This creates a centralized structure that all experiments will use, ensuring
+    methodological consistency across experiments.
+    
+    Parameters:
+    - force_regenerate: If True, regenerates structure even if it already exists
+    
+    Returns:
+    - success: Boolean indicating if structure was generated successfully
+    - message: Status message
+    """
+    try:
+        # Check if structure already exists
+        existing_structure = execute_sql("""
+            SELECT COUNT(*) FROM v2_bradley_terry_structure
+        """, fetch=True)
+        
+        if existing_structure and existing_structure[0][0] > 0 and not force_regenerate:
+            return True, "Bradley-Terry structure already exists. Use force_regenerate=True to recreate."
+        
+        # Get count of selected cases
+        selected_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
+        
+        if selected_count == 0:
+            return False, "No cases selected for experiments. Please select cases first."
+        
+        # Check if case count is divisible by 15
+        if selected_count % 15 != 0:
+            return False, f"Selected case count ({selected_count}) must be divisible by 15. Current remainder: {selected_count % 15}"
+        
+        # Calculate importance scores for all selected cases
+        importance_scores = calculate_case_importance_scores()
+        
+        if not importance_scores:
+            return False, "Could not calculate importance scores for selected cases."
+        
+        # Sort cases by importance score (highest first)
+        sorted_cases = sorted(importance_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Clear existing structure if regenerating
+        if force_regenerate:
+            execute_sql("DELETE FROM v2_bradley_terry_structure")
+        
+        # Calculate block parameters
+        num_blocks = selected_count // 15
+        core_cases_per_block = 12
+        bridge_cases_per_block = 3
+        
+        # Assign core cases (top-ranked cases)
+        core_cases = sorted_cases[:num_blocks * core_cases_per_block]
+        
+        # Assign bridge cases (remaining cases)
+        bridge_cases = sorted_cases[num_blocks * core_cases_per_block:]
+        
+        # Generate block assignments
+        block_assignments = []
+        
+        # Assign core cases to blocks (distribute evenly)
+        for i, (case_id, score) in enumerate(core_cases):
+            block_number = (i // core_cases_per_block) + 1
+            block_assignments.append({
+                'case_id': case_id,
+                'block_number': block_number,
+                'case_role': 'core',
+                'importance_score': score
+            })
+        
+        # Assign bridge cases to blocks (distribute to connect blocks)
+        bridge_case_index = 0
+        for block_num in range(1, num_blocks + 1):
+            # Each block gets bridge_cases_per_block bridge cases
+            for _ in range(bridge_cases_per_block):
+                if bridge_case_index < len(bridge_cases):
+                    case_id, score = bridge_cases[bridge_case_index]
+                    block_assignments.append({
+                        'case_id': case_id,
+                        'block_number': block_num,
+                        'case_role': 'bridge',
+                        'importance_score': score
+                    })
+                    bridge_case_index += 1
+        
+        # Insert assignments into database
+        for assignment in block_assignments:
+            execute_sql("""
+                INSERT INTO v2_bradley_terry_structure 
+                (case_id, block_number, case_role, importance_score, assigned_by)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                assignment['case_id'],
+                assignment['block_number'], 
+                assignment['case_role'],
+                assignment['importance_score'],
+                'system'
+            ))
+        
+        return True, f"Successfully generated Bradley-Terry structure: {num_blocks} blocks, {len(core_cases)} core cases, {len(bridge_cases)} bridge cases."
+    
+    except Exception as e:
+        return False, f"Error generating Bradley-Terry structure: {str(e)}"
+
+def get_bradley_terry_structure():
+    """
+    Get the current Bradley-Terry block structure.
+    
+    Returns:
+    - structure: List of dicts with case assignments, or None if no structure exists
+    """
+    try:
+        structure_data = execute_sql("""
+            SELECT s.case_id, s.block_number, s.case_role, s.importance_score,
+                   c.case_name, c.citation, c.decision_year, c.area_of_law
+            FROM v2_bradley_terry_structure s
+            JOIN v2_cases c ON s.case_id = c.case_id
+            ORDER BY s.block_number, s.case_role DESC, s.importance_score DESC
+        """, fetch=True)
+        
+        if not structure_data:
+            return None
+        
+        structure = []
+        for row in structure_data:
+            case_id, block_num, role, score, name, citation, year, area = row
+            structure.append({
+                'case_id': case_id,
+                'block_number': block_num,
+                'case_role': role,
+                'importance_score': float(score) if score else 0.0,
+                'case_name': name,
+                'citation': citation,
+                'decision_year': year,
+                'area_of_law': area
+            })
+        
+        return structure
+    
+    except Exception as e:
+        st.error(f"Error retrieving Bradley-Terry structure: {e}")
+        return None
+
+def get_block_summary():
+    """
+    Get a summary of the Bradley-Terry block structure.
+    
+    Returns:
+    - summary: Dict with block statistics
+    """
+    try:
+        structure = get_bradley_terry_structure()
+        if not structure:
+            return None
+        
+        # Calculate summary statistics
+        blocks = {}
+        total_core = 0
+        total_bridge = 0
+        
+        for case in structure:
+            block_num = case['block_number']
+            role = case['case_role']
+            
+            if block_num not in blocks:
+                blocks[block_num] = {'core': 0, 'bridge': 0, 'total': 0}
+            
+            blocks[block_num][role] += 1
+            blocks[block_num]['total'] += 1
+            
+            if role == 'core':
+                total_core += 1
+            else:
+                total_bridge += 1
+        
+        return {
+            'total_blocks': len(blocks),
+            'total_cases': len(structure),
+            'total_core_cases': total_core,
+            'total_bridge_cases': total_bridge,
+            'cases_per_block': 15,
+            'core_per_block': 12,
+            'bridge_per_block': 3,
+            'blocks_detail': blocks
+        }
+    
+    except Exception as e:
+        st.error(f"Error generating block summary: {e}")
+        return None
+
+def generate_bradley_terry_comparison_pairs():
+    """
+    Generate the optimal comparison pairs based on the Bradley-Terry block structure.
+    
+    Returns:
+    - pairs: List of (case_id_1, case_id_2) tuples for all required comparisons
+    - block_info: Dict mapping each pair to its block information
+    """
+    try:
+        structure = get_bradley_terry_structure()
+        if not structure:
+            return [], {}
+        
+        # Group cases by block
+        blocks = {}
+        for case in structure:
+            block_num = case['block_number']
+            if block_num not in blocks:
+                blocks[block_num] = []
+            blocks[block_num].append(case)
+        
+        # Generate all pairwise comparisons within each block
+        comparison_pairs = []
+        pair_block_info = {}
+        
+        for block_num, block_cases in blocks.items():
+            # Generate all pairwise combinations within this block
+            for i in range(len(block_cases)):
+                for j in range(i + 1, len(block_cases)):
+                    case1 = block_cases[i]
+                    case2 = block_cases[j]
+                    
+                    pair = (case1['case_id'], case2['case_id'])
+                    comparison_pairs.append(pair)
+                    
+                    # Store block info for this pair
+                    pair_block_info[pair] = {
+                        'block_number': block_num,
+                        'case1_role': case1['case_role'],
+                        'case2_role': case2['case_role'],
+                        'case1_name': case1['case_name'],
+                        'case2_name': case2['case_name'],
+                        'case1_importance': case1['importance_score'],
+                        'case2_importance': case2['importance_score']
+                    }
+        
+        return comparison_pairs, pair_block_info
+    
+    except Exception as e:
+        st.error(f"Error generating comparison pairs: {e}")
+        return [], {}

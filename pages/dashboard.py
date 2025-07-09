@@ -21,8 +21,12 @@ from utils.case_management import (
     get_case_summary, get_available_cases, filter_cases_by_criteria,
     get_experiment_selected_cases, get_available_cases_for_selection,
     add_cases_to_experiments, remove_cases_from_experiments,
-    calculate_bradley_terry_comparisons
+    calculate_bradley_terry_comparisons, generate_bradley_terry_structure,
+    get_bradley_terry_structure, get_block_summary, generate_bradley_terry_comparison_pairs
 )
+
+# Import experiment execution module
+from pages import experiment_execution
 
 @st.cache_resource
 def initialize_experiment_tables():
@@ -281,6 +285,36 @@ def initialize_experiment_tables():
             );
         ''')
     
+    # Bradley-Terry structure table (v2) - Centralized block assignments for consistent methodology
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_bradley_terry_structure (
+                structure_id SERIAL PRIMARY KEY,
+                case_id INTEGER,
+                block_number INTEGER NOT NULL,
+                case_role TEXT CHECK (case_role IN ('core', 'bridge')) NOT NULL,
+                importance_score REAL DEFAULT 0.0,
+                assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                assigned_by TEXT DEFAULT 'system',
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(case_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_bradley_terry_structure (
+                structure_id INTEGER PRIMARY KEY,
+                case_id INTEGER,
+                block_number INTEGER NOT NULL,
+                case_role TEXT CHECK (case_role IN ('core', 'bridge')) NOT NULL,
+                importance_score REAL DEFAULT 0.0,
+                assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                assigned_by TEXT DEFAULT 'system',
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(case_id)
+            );
+        ''')
+    
     # Add indexes for performance (v2)
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_citation ON v2_cases (citation);')
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_year ON v2_cases (decision_year);')
@@ -291,6 +325,9 @@ def initialize_experiment_tables():
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_experiment_id ON v2_experiment_comparisons (experiment_id);')
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_results_experiment_id ON v2_experiment_results (experiment_id);')
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_selected_cases_case_id ON v2_experiment_selected_cases (case_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_case_id ON v2_bradley_terry_structure (case_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_block ON v2_bradley_terry_structure (block_number);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_role ON v2_bradley_terry_structure (case_role);')
     
     # Additional performance indexes
     execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_modified_date ON v2_experiments (modified_date DESC);')
@@ -892,13 +929,29 @@ def show_case_management():
                         areas=area_filter if area_filter else None
                     ))
                     
+                    # Calculate suggested values divisible by 15
+                    max_selectable = min(available_count, 100)
+                    suggested_max = (max_selectable // 15) * 15
+                    suggested_default = min(15, suggested_max) if suggested_max > 0 else 15
+                    
                     num_to_select = st.number_input(
-                        f"Number of cases to randomly select",
-                        min_value=1, 
-                        max_value=min(available_count, 100), 
-                        value=min(10, available_count),
-                        help=f"{available_count} cases available with current filters"
+                        f"Number of cases to randomly select (must be divisible by 15)",
+                        min_value=15, 
+                        max_value=max_selectable, 
+                        value=suggested_default,
+                        step=15,
+                        help=f"{available_count} cases available with current filters. Bradley-Terry analysis requires blocks of 15 cases (12 core + 3 bridge)."
                     )
+                    
+                    # Validation for multiples of 15
+                    if num_to_select % 15 != 0:
+                        st.error(f"⚠️ Number of cases must be divisible by 15 for Bradley-Terry block structure. Current: {num_to_select}, remainder: {num_to_select % 15}")
+                        st.info(f"💡 Suggested values: {', '.join(str(i) for i in range(15, max_selectable + 1, 15) if i <= max_selectable)[:50]}...")
+                        selection_valid = False
+                    else:
+                        blocks_needed = num_to_select // 15
+                        st.success(f"✅ Valid selection: {num_to_select} cases = {blocks_needed} block{'s' if blocks_needed != 1 else ''} of 15 cases each")
+                        selection_valid = True
             
             with col2:
                 st.write("**Preview:**")
@@ -920,9 +973,12 @@ def show_case_management():
                     else:
                         st.warning("No cases available with current filters")
             
-            # Add cases button
-            if st.button("🎲 Randomly Select and Add Cases", type="primary"):
-                if num_to_select > 0:
+            # Add cases button (only enabled if selection is valid)
+            button_disabled = not selection_valid if 'selection_valid' in locals() else num_to_select % 15 != 0
+            button_label = "🎲 Randomly Select and Add Cases" if not button_disabled else "❌ Invalid Selection (Must be divisible by 15)"
+            
+            if st.button(button_label, type="primary", disabled=button_disabled):
+                if num_to_select > 0 and num_to_select % 15 == 0:
                     with st.spinner(f"Randomly selecting {num_to_select} cases..."):
                         # Get random cases
                         new_cases = get_available_cases_for_selection(
@@ -937,6 +993,21 @@ def show_case_management():
                             
                             if success_count > 0:
                                 st.success(f"✅ Successfully added {success_count} cases to experiments!")
+                                
+                                # Check if we should generate/update Bradley-Terry structure
+                                total_selected = len(get_experiment_selected_cases())
+                                if total_selected % 15 == 0:
+                                    with st.spinner("Generating Bradley-Terry block structure..."):
+                                        success, message = generate_bradley_terry_structure(force_regenerate=True)
+                                        if success:
+                                            st.success(f"🎯 {message}")
+                                            
+                                            # Show block summary
+                                            block_summary = get_block_summary()
+                                            if block_summary:
+                                                st.info(f"📊 Structure: {block_summary['total_blocks']} blocks, {block_summary['total_core_cases']} core cases, {block_summary['total_bridge_cases']} bridge cases")
+                                        else:
+                                            st.warning(f"⚠️ Bradley-Terry structure generation failed: {message}")
                                 
                                 # Show added cases
                                 with st.expander("📋 Cases Added"):
@@ -1605,8 +1676,8 @@ def show():
     show_sidebar_navigation()
     
     # Main content area - no redundant title since it's in sidebar
-    # Get current page from session state
-    current_page = st.session_state.get('selected_page', 'Cases')
+    # Get current page from session state - check both selected_page and page_navigation
+    current_page = st.session_state.get('page_navigation') or st.session_state.get('selected_page', 'Cases')
     
     # Render content based on selected page
     if current_page == "Cases":
@@ -1627,3 +1698,14 @@ def show():
         
     elif current_page == "Create Experiment":
         show_experiment_configuration()
+        
+    elif current_page == "⚗️ Experiment Execution":
+        # Show experiment execution interface
+        active_experiment = st.session_state.get('active_experiment')
+        if active_experiment:
+            experiment_execution.show(active_experiment)
+        else:
+            st.error("No active experiment selected")
+            st.session_state.page_navigation = None  # Reset navigation
+            st.session_state.selected_page = "Library Overview"
+            st.rerun()
