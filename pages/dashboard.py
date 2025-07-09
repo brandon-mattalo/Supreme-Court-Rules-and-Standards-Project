@@ -30,6 +30,1527 @@ from utils.case_management import (
 # Import experiment execution module
 from pages import experiment_execution
 
+def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_comparisons):
+    """Display comprehensive Bradley-Terry analysis and results"""
+    
+    # Import analysis libraries
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    try:
+        # Get comprehensive comparison data with case information
+        comparison_data = execute_sql("""
+            SELECT 
+                ec.comparison_id,
+                ec.extraction_id_1,
+                ec.extraction_id_2,
+                ec.winner_id,
+                ec.comparison_rationale,
+                ec.confidence_score,
+                ec.comparison_date,
+                c1.case_name as case_a_name,
+                c1.citation as case_a_citation,
+                c1.decision_year as case_a_year,
+                c2.case_name as case_b_name,
+                c2.citation as case_b_citation,
+                c2.decision_year as case_b_year,
+                ee1.legal_test_content as test_a_content,
+                ee2.legal_test_content as test_b_content,
+                ee1.test_novelty as test_a_novelty,
+                ee2.test_novelty as test_b_novelty
+            FROM v2_experiment_comparisons ec
+            JOIN v2_experiment_extractions ee1 ON ec.extraction_id_1 = ee1.extraction_id
+            JOIN v2_experiment_extractions ee2 ON ec.extraction_id_2 = ee2.extraction_id
+            JOIN v2_cases c1 ON ee1.case_id = c1.case_id
+            JOIN v2_cases c2 ON ee2.case_id = c2.case_id
+            WHERE ec.experiment_id = ?
+            ORDER BY ec.comparison_date
+        """, (experiment_id,), fetch=True)
+        
+        if not comparison_data:
+            st.error("No comparison data found for analysis.")
+            return
+        
+        # Convert to DataFrame for analysis
+        comparison_df = pd.DataFrame(comparison_data, columns=[
+            'comparison_id', 'extraction_id_1', 'extraction_id_2', 'winner_id', 'comparison_rationale',
+            'confidence_score', 'comparison_date', 'case_a_name', 'case_a_citation', 'case_a_year',
+            'case_b_name', 'case_b_citation', 'case_b_year', 'test_a_content', 'test_b_content',
+            'test_a_novelty', 'test_b_novelty'
+        ])
+        
+        # Calculate Bradley-Terry statistics
+        bradley_terry_stats = calculate_bradley_terry_statistics(comparison_df)
+        
+        # Show analysis in organized tabs
+        analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4, analysis_tab5 = st.tabs([
+            "📊 Overview", "🏆 Rankings", "📈 Temporal Analysis", "🔍 Reliability", "📈 Statistical Reliability"
+        ])
+        
+        with analysis_tab1:
+            show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_tests, total_comparisons)
+        
+        with analysis_tab2:
+            show_bradley_terry_rankings(comparison_df, bradley_terry_stats)
+        
+        with analysis_tab3:
+            show_temporal_analysis(comparison_df, bradley_terry_stats)
+        
+        with analysis_tab4:
+            show_reliability_analysis(comparison_df, bradley_terry_stats)
+        
+        with analysis_tab5:
+            show_advanced_reliability_metrics(comparison_df, bradley_terry_stats)
+            
+    except Exception as e:
+        st.error(f"Error in Bradley-Terry analysis: {str(e)}")
+        st.write("Debug info:", str(e))
+
+def calculate_bradley_terry_statistics(comparison_df):
+    """Calculate comprehensive Bradley-Terry statistics"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    # Get all unique extractions (cases)
+    all_extractions = set(comparison_df['extraction_id_1'].tolist() + comparison_df['extraction_id_2'].tolist())
+    
+    # Initialize win-loss matrix
+    wins = {ext_id: 0 for ext_id in all_extractions}
+    losses = {ext_id: 0 for ext_id in all_extractions}
+    total_comparisons = {ext_id: 0 for ext_id in all_extractions}
+    
+    # Count wins and losses
+    for _, row in comparison_df.iterrows():
+        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+        
+        total_comparisons[id_1] += 1
+        total_comparisons[id_2] += 1
+        
+        if winner_id == id_1:
+            wins[id_1] += 1
+            losses[id_2] += 1
+        elif winner_id == id_2:
+            wins[id_2] += 1
+            losses[id_1] += 1
+        # If no winner, neither gets a win
+    
+    # Calculate Bradley-Terry scores using iterative method
+    scores, comparisons = calculate_bradley_terry_scores(comparison_df, all_extractions)
+    
+    # Calculate win percentages
+    win_percentages = {ext_id: wins[ext_id] / total_comparisons[ext_id] if total_comparisons[ext_id] > 0 else 0 
+                      for ext_id in all_extractions}
+    
+    # Calculate reliability metrics
+    reliability_metrics = calculate_reliability_metrics(comparison_df)
+    
+    # Calculate Fisher Information Matrix and confidence intervals
+    try:
+        fisher_matrix = calculate_fisher_information_matrix(scores, comparisons, list(all_extractions))
+        ci_results = calculate_confidence_intervals(scores, fisher_matrix, list(all_extractions))
+        
+        # Calculate pairwise significance tests
+        significance_results = calculate_pairwise_significance(
+            scores, ci_results.get('covariance_matrix'), list(all_extractions)
+        )
+        
+        # Calculate item separation reliability
+        separation_reliability = calculate_item_separation_reliability(
+            scores, ci_results.get('standard_errors', {})
+        )
+        
+        # Calculate overdispersion and model diagnostics
+        model_diagnostics = calculate_overdispersion_tests(comparison_df, scores, comparisons)
+        
+    except Exception as e:
+        ci_results = {
+            'standard_errors': {ext_id: 0 for ext_id in all_extractions},
+            'confidence_intervals': {ext_id: {'lower': scores[ext_id], 'upper': scores[ext_id], 'margin_error': 0} for ext_id in all_extractions},
+            'covariance_matrix': None,
+            'confidence_level': 0.95,
+            'error': str(e)
+        }
+        significance_results = {
+            'significance_matrix': {},
+            'z_statistics': {},
+            'p_values': {},
+            'significant_pairs': [],
+            'warning': f'Error calculating significance: {str(e)}'
+        }
+        separation_reliability = {
+            'separation_coefficient': 0,
+            'reliability': 0,
+            'estimated_strata': 1,
+            'interpretation': 'Poor separation',
+            'error': str(e)
+        }
+        model_diagnostics = {
+            'deviance': 0,
+            'pearson_chi2': 0,
+            'overdispersion_ratio': 1,
+            'degrees_freedom': 0,
+            'interpretation': 'Cannot calculate',
+            'error': str(e)
+        }
+        fisher_matrix = None
+    
+    return {
+        'extraction_ids': list(all_extractions),
+        'wins': wins,
+        'losses': losses,
+        'total_comparisons': total_comparisons,
+        'win_percentages': win_percentages,
+        'bradley_terry_scores': scores,
+        'reliability_metrics': reliability_metrics,
+        'confidence_intervals': ci_results,
+        'significance_tests': significance_results,
+        'separation_reliability': separation_reliability,
+        'model_diagnostics': model_diagnostics,
+        'fisher_matrix': fisher_matrix
+    }
+
+def calculate_bradley_terry_scores(comparison_df, all_extractions, max_iterations=1000, tolerance=1e-6):
+    """Calculate Bradley-Terry scores using iterative method with enhanced statistical output"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    # Initialize scores (start with equal probabilities)
+    scores = {ext_id: 1.0 for ext_id in all_extractions}
+    
+    # Create comparison matrix
+    comparisons = {}
+    for _, row in comparison_df.iterrows():
+        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+        
+        key = tuple(sorted([id_1, id_2]))
+        if key not in comparisons:
+            comparisons[key] = {'total': 0, 'wins': {id_1: 0, id_2: 0}}
+        
+        comparisons[key]['total'] += 1
+        if winner_id == id_1:
+            comparisons[key]['wins'][id_1] += 1
+        elif winner_id == id_2:
+            comparisons[key]['wins'][id_2] += 1
+    
+    # Iterative estimation
+    for iteration in range(max_iterations):
+        old_scores = scores.copy()
+        
+        # Update each score
+        for ext_id in all_extractions:
+            numerator = 0
+            denominator = 0
+            
+            for (id_1, id_2), comp_data in comparisons.items():
+                if ext_id in [id_1, id_2]:
+                    other_id = id_2 if ext_id == id_1 else id_1
+                    
+                    wins_against_other = comp_data['wins'][ext_id]
+                    total_against_other = comp_data['total']
+                    
+                    numerator += wins_against_other
+                    denominator += total_against_other / (scores[ext_id] + scores[other_id])
+            
+            if denominator > 0:
+                scores[ext_id] = numerator / denominator
+        
+        # Check for convergence
+        max_change = max(abs(scores[ext_id] - old_scores[ext_id]) for ext_id in all_extractions)
+        if max_change < tolerance:
+            break
+    
+    # Normalize scores so they sum to number of items
+    total_score = sum(scores.values())
+    if total_score > 0:
+        n_items = len(all_extractions)
+        scores = {ext_id: score * n_items / total_score for ext_id, score in scores.items()}
+    
+    return scores, comparisons
+
+def calculate_fisher_information_matrix(scores, comparisons, all_extractions):
+    """Calculate Fisher Information Matrix for Bradley-Terry model"""
+    np = _get_numpy()
+    
+    n_items = len(all_extractions)
+    ext_to_idx = {ext_id: i for i, ext_id in enumerate(all_extractions)}
+    
+    # Initialize Fisher Information Matrix
+    fisher_matrix = np.zeros((n_items, n_items))
+    
+    # Calculate second derivatives of log-likelihood
+    for (id_1, id_2), comp_data in comparisons.items():
+        if id_1 in scores and id_2 in scores:
+            i = ext_to_idx[id_1]
+            j = ext_to_idx[id_2]
+            
+            pi = scores[id_1]
+            pj = scores[id_2]
+            nij = comp_data['total']
+            
+            # Second derivative elements for Bradley-Terry log-likelihood
+            # For pairs (i,j): d²L/dβi² = -nij * pi * pj / (pi + pj)²
+            denominator = (pi + pj) ** 2
+            if denominator > 0:
+                fisher_val = nij * pi * pj / denominator
+                
+                # Diagonal elements (negative second derivatives)
+                fisher_matrix[i, i] += fisher_val
+                fisher_matrix[j, j] += fisher_val
+                
+                # Off-diagonal elements
+                fisher_matrix[i, j] -= fisher_val
+                fisher_matrix[j, i] -= fisher_val
+    
+    return fisher_matrix
+
+def calculate_confidence_intervals(scores, fisher_matrix, all_extractions, confidence_level=0.95):
+    """Calculate confidence intervals for Bradley-Terry scores"""
+    np = _get_numpy()
+    from scipy import stats
+    
+    try:
+        # Calculate covariance matrix (inverse of Fisher Information Matrix)
+        covariance_matrix = np.linalg.inv(fisher_matrix)
+        
+        # Extract standard errors (sqrt of diagonal elements)
+        standard_errors = {}
+        confidence_intervals = {}
+        
+        # Get critical value for confidence level
+        alpha = 1 - confidence_level
+        z_critical = stats.norm.ppf(1 - alpha/2)
+        
+        for i, ext_id in enumerate(all_extractions):
+            if i < len(covariance_matrix):
+                # Standard error
+                variance = covariance_matrix[i, i]
+                if variance > 0:
+                    se = np.sqrt(variance)
+                    standard_errors[ext_id] = se
+                    
+                    # Confidence interval
+                    score = scores[ext_id]
+                    margin_error = z_critical * se
+                    confidence_intervals[ext_id] = {
+                        'lower': score - margin_error,
+                        'upper': score + margin_error,
+                        'margin_error': margin_error
+                    }
+                else:
+                    standard_errors[ext_id] = 0
+                    confidence_intervals[ext_id] = {
+                        'lower': scores[ext_id],
+                        'upper': scores[ext_id], 
+                        'margin_error': 0
+                    }
+        
+        return {
+            'standard_errors': standard_errors,
+            'confidence_intervals': confidence_intervals,
+            'covariance_matrix': covariance_matrix,
+            'confidence_level': confidence_level
+        }
+        
+    except np.linalg.LinAlgError:
+        # Fallback if matrix is singular
+        standard_errors = {ext_id: 0 for ext_id in all_extractions}
+        confidence_intervals = {ext_id: {
+            'lower': scores[ext_id], 'upper': scores[ext_id], 'margin_error': 0
+        } for ext_id in all_extractions}
+        
+        return {
+            'standard_errors': standard_errors,
+            'confidence_intervals': confidence_intervals,
+            'covariance_matrix': None,
+            'confidence_level': confidence_level,
+            'warning': 'Singular matrix - unable to calculate reliable confidence intervals'
+        }
+
+def calculate_pairwise_significance(scores, covariance_matrix, all_extractions, alpha=0.05):
+    """Calculate statistical significance of pairwise differences using Wald tests"""
+    np = _get_numpy()
+    from scipy import stats
+    
+    if covariance_matrix is None:
+        return {
+            'significance_matrix': {},
+            'z_statistics': {},
+            'p_values': {},
+            'significant_pairs': [],
+            'warning': 'No covariance matrix available - cannot calculate significance'
+        }
+    
+    ext_to_idx = {ext_id: i for i, ext_id in enumerate(all_extractions)}
+    n_items = len(all_extractions)
+    
+    # Initialize result dictionaries
+    significance_matrix = {}
+    z_statistics = {}
+    p_values = {}
+    significant_pairs = []
+    
+    # Calculate pairwise differences and their significance
+    for i, ext_id_1 in enumerate(all_extractions):
+        significance_matrix[ext_id_1] = {}
+        z_statistics[ext_id_1] = {}
+        p_values[ext_id_1] = {}
+        
+        for j, ext_id_2 in enumerate(all_extractions):
+            if i != j:
+                # Difference in scores
+                score_diff = scores[ext_id_1] - scores[ext_id_2]
+                
+                # Standard error of the difference: SE(diff) = sqrt(Var(i) + Var(j) - 2*Cov(i,j))
+                var_i = covariance_matrix[i, i] if i < covariance_matrix.shape[0] else 0
+                var_j = covariance_matrix[j, j] if j < covariance_matrix.shape[1] else 0
+                cov_ij = covariance_matrix[i, j] if i < covariance_matrix.shape[0] and j < covariance_matrix.shape[1] else 0
+                
+                se_diff = np.sqrt(var_i + var_j - 2 * cov_ij)
+                
+                if se_diff > 0:
+                    # Z-statistic for Wald test
+                    z_stat = score_diff / se_diff
+                    
+                    # P-value (two-tailed test)
+                    p_value = 2 * (1 - stats.norm.cdf(abs(z_stat)))
+                    
+                    # Store results
+                    z_statistics[ext_id_1][ext_id_2] = z_stat
+                    p_values[ext_id_1][ext_id_2] = p_value
+                    significance_matrix[ext_id_1][ext_id_2] = p_value < alpha
+                    
+                    # Track significant pairs
+                    if p_value < alpha and score_diff > 0:  # Only count when first item significantly better
+                        significant_pairs.append({
+                            'item_1': ext_id_1,
+                            'item_2': ext_id_2,
+                            'score_diff': score_diff,
+                            'z_statistic': z_stat,
+                            'p_value': p_value
+                        })
+                else:
+                    z_statistics[ext_id_1][ext_id_2] = 0
+                    p_values[ext_id_1][ext_id_2] = 1.0
+                    significance_matrix[ext_id_1][ext_id_2] = False
+            else:
+                # Same item comparison
+                z_statistics[ext_id_1][ext_id_2] = 0
+                p_values[ext_id_1][ext_id_2] = 1.0
+                significance_matrix[ext_id_1][ext_id_2] = False
+    
+    # Apply Bonferroni correction for multiple comparisons
+    n_comparisons = n_items * (n_items - 1)  # Total pairwise comparisons
+    bonferroni_alpha = alpha / n_comparisons if n_comparisons > 0 else alpha
+    
+    bonferroni_significant = []
+    for pair in significant_pairs:
+        if pair['p_value'] < bonferroni_alpha:
+            bonferroni_significant.append(pair)
+    
+    return {
+        'significance_matrix': significance_matrix,
+        'z_statistics': z_statistics,
+        'p_values': p_values,
+        'significant_pairs': significant_pairs,
+        'bonferroni_significant': bonferroni_significant,
+        'alpha': alpha,
+        'bonferroni_alpha': bonferroni_alpha,
+        'n_comparisons': n_comparisons
+    }
+
+def calculate_item_separation_reliability(scores, standard_errors):
+    """Calculate item separation reliability index"""
+    np = _get_numpy()
+    
+    if not scores or not standard_errors:
+        return {
+            'separation_coefficient': 0,
+            'reliability': 0,
+            'estimated_strata': 1,
+            'interpretation': 'Poor separation',
+            'warning': 'Insufficient data for calculation'
+        }
+    
+    # Calculate true score variance (variance of Bradley-Terry scores)
+    score_values = list(scores.values())
+    true_variance = np.var(score_values, ddof=1) if len(score_values) > 1 else 0
+    
+    # Calculate error variance (mean of squared standard errors)
+    se_values = [se for se in standard_errors.values() if se > 0]
+    error_variance = np.mean([se**2 for se in se_values]) if se_values else 0
+    
+    if error_variance <= 0 or true_variance <= 0:
+        return {
+            'separation_coefficient': 0,
+            'reliability': 0,
+            'estimated_strata': 1,
+            'interpretation': 'Poor separation',
+            'warning': 'Unable to calculate - insufficient variance'
+        }
+    
+    # Calculate separation coefficient: ratio of true SD to error SD
+    true_sd = np.sqrt(true_variance)
+    error_sd = np.sqrt(error_variance)
+    separation_coefficient = true_sd / error_sd
+    
+    # Calculate reliability: Separation² / (1 + Separation²)
+    reliability = (separation_coefficient ** 2) / (1 + separation_coefficient ** 2)
+    
+    # Estimate number of statistically distinguishable strata
+    # Rule of thumb: (4 * Separation + 1) / 3
+    estimated_strata = max(1, int((4 * separation_coefficient + 1) / 3))
+    
+    # Interpretation
+    if reliability > 0.9:
+        interpretation = 'Excellent separation'
+    elif reliability > 0.8:
+        interpretation = 'Good separation'
+    elif reliability > 0.7:
+        interpretation = 'Acceptable separation'
+    else:
+        interpretation = 'Poor separation'
+    
+    return {
+        'separation_coefficient': separation_coefficient,
+        'reliability': reliability,
+        'estimated_strata': estimated_strata,
+        'interpretation': interpretation,
+        'true_variance': true_variance,
+        'error_variance': error_variance,
+        'n_items': len(scores)
+    }
+
+def calculate_overdispersion_tests(comparison_df, scores, comparisons):
+    """Calculate overdispersion and model diagnostic tests"""
+    np = _get_numpy()
+    from scipy import stats
+    
+    if not scores or not comparisons:
+        return {
+            'deviance': 0,
+            'pearson_chi2': 0,
+            'overdispersion_ratio': 1,
+            'degrees_freedom': 0,
+            'deviance_p_value': 1,
+            'pearson_p_value': 1,
+            'interpretation': 'Cannot calculate - insufficient data'
+        }
+    
+    # Calculate residuals and fit statistics
+    total_deviance = 0
+    total_pearson_chi2 = 0
+    n_comparisons = 0
+    
+    for (id_1, id_2), comp_data in comparisons.items():
+        if id_1 in scores and id_2 in scores:
+            pi = scores[id_1]
+            pj = scores[id_2]
+            
+            # Expected probability that i beats j
+            expected_prob = pi / (pi + pj)
+            
+            # Observed data
+            wins_i = comp_data['wins'][id_1]
+            total_games = comp_data['total']
+            observed_prob = wins_i / total_games if total_games > 0 else 0
+            
+            # Deviance contribution
+            if observed_prob > 0 and observed_prob < 1:
+                deviance_contrib = 2 * total_games * (
+                    observed_prob * np.log(observed_prob / expected_prob) +
+                    (1 - observed_prob) * np.log((1 - observed_prob) / (1 - expected_prob))
+                )
+                total_deviance += deviance_contrib
+            
+            # Pearson chi-square contribution
+            expected_wins = expected_prob * total_games
+            if expected_wins > 0 and expected_wins < total_games:
+                pearson_contrib = ((wins_i - expected_wins) ** 2) / (expected_wins * (1 - expected_prob))
+                total_pearson_chi2 += pearson_contrib
+            
+            n_comparisons += 1
+    
+    # Degrees of freedom = number of comparisons - number of parameters
+    # For Bradley-Terry: n_items - 1 parameters (one is fixed as reference)
+    n_parameters = len(scores) - 1
+    degrees_freedom = max(1, n_comparisons - n_parameters)
+    
+    # Overdispersion ratio (should be approximately 1 if model fits well)
+    overdispersion_ratio = total_deviance / degrees_freedom if degrees_freedom > 0 else 1
+    
+    # P-values for goodness-of-fit tests
+    deviance_p_value = 1 - stats.chi2.cdf(total_deviance, degrees_freedom) if degrees_freedom > 0 else 1
+    pearson_p_value = 1 - stats.chi2.cdf(total_pearson_chi2, degrees_freedom) if degrees_freedom > 0 else 1
+    
+    # Interpretation
+    if overdispersion_ratio > 2:
+        interpretation = 'Significant overdispersion detected'
+    elif overdispersion_ratio > 1.5:
+        interpretation = 'Moderate overdispersion'
+    elif overdispersion_ratio < 0.5:
+        interpretation = 'Possible underdispersion'
+    else:
+        interpretation = 'Dispersion within expected range'
+    
+    return {
+        'deviance': total_deviance,
+        'pearson_chi2': total_pearson_chi2,
+        'overdispersion_ratio': overdispersion_ratio,
+        'degrees_freedom': degrees_freedom,
+        'deviance_p_value': deviance_p_value,
+        'pearson_p_value': pearson_p_value,
+        'n_comparisons': n_comparisons,
+        'n_parameters': n_parameters,
+        'interpretation': interpretation
+    }
+
+def calculate_reliability_metrics(comparison_df):
+    """Calculate reliability and consistency metrics"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    # Create a copy to avoid modifying the original
+    comparison_df = comparison_df.copy()
+    
+    total_comparisons = len(comparison_df)
+    decisive_comparisons = len(comparison_df[comparison_df['winner_id'].notna()])
+    
+    # Calculate average confidence score
+    avg_confidence = comparison_df['confidence_score'].mean() if 'confidence_score' in comparison_df.columns else 0
+    
+    # Calculate temporal consistency (only meaningful for extended comparison periods)
+    temporal_consistency = None
+    temporal_consistency_note = "N/A (batch processing)"
+    
+    if 'comparison_date' in comparison_df.columns and len(comparison_df) > 1:
+        # Convert dates and check time span
+        comparison_df['comparison_date'] = pd.to_datetime(comparison_df['comparison_date'])
+        time_span = (comparison_df['comparison_date'].max() - comparison_df['comparison_date'].min()).days
+        
+        # Only calculate if comparisons span multiple days (meaningful temporal variation)
+        if time_span > 1:
+            df_sorted = comparison_df.sort_values('comparison_date')
+            
+            # Split comparisons into early and late periods
+            midpoint = len(df_sorted) // 2
+            early_comparisons = df_sorted.iloc[:midpoint]
+            late_comparisons = df_sorted.iloc[midpoint:]
+            
+            # Calculate win rates for each period
+            def get_win_rates(df_subset):
+                win_rates = {}
+                for _, row in df_subset.iterrows():
+                    id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+                    
+                    for ext_id in [id_1, id_2]:
+                        if ext_id not in win_rates:
+                            win_rates[ext_id] = {'wins': 0, 'total': 0}
+                        win_rates[ext_id]['total'] += 1
+                        if winner_id == ext_id:
+                            win_rates[ext_id]['wins'] += 1
+                
+                # Convert to percentages
+                for ext_id in win_rates:
+                    if win_rates[ext_id]['total'] > 0:
+                        win_rates[ext_id] = win_rates[ext_id]['wins'] / win_rates[ext_id]['total']
+                    else:
+                        win_rates[ext_id] = 0
+                
+                return win_rates
+            
+            early_rates = get_win_rates(early_comparisons)
+            late_rates = get_win_rates(late_comparisons)
+            
+            # Calculate consistency (how similar the win rates are between periods)
+            common_extractions = set(early_rates.keys()) & set(late_rates.keys())
+            if common_extractions:
+                differences = [abs(early_rates[ext_id] - late_rates[ext_id]) for ext_id in common_extractions]
+                avg_difference = sum(differences) / len(differences)
+                temporal_consistency = 1.0 - avg_difference  # Higher = more consistent
+                temporal_consistency_note = f"Based on {time_span} day span"
+            else:
+                temporal_consistency = 0.5
+                temporal_consistency_note = "Insufficient overlap"
+        else:
+            temporal_consistency_note = "All comparisons same day"
+    
+    # Calculate transitivity violations (A beats B, B beats C, C beats A)
+    transitivity_score = calculate_transitivity_score(comparison_df)
+    
+    return {
+        'total_comparisons': total_comparisons,
+        'decisive_comparisons': decisive_comparisons,
+        'decisiveness_rate': decisive_comparisons / total_comparisons if total_comparisons > 0 else 0,
+        'average_confidence': avg_confidence,
+        'temporal_consistency': temporal_consistency,
+        'temporal_consistency_note': temporal_consistency_note,
+        'transitivity_score': transitivity_score
+    }
+
+def calculate_transitivity_score(comparison_df):
+    """Calculate transitivity score (higher = more consistent)"""
+    # Build win relationships
+    wins = {}  # wins[A][B] = True if A beats B
+    
+    for _, row in comparison_df.iterrows():
+        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+        
+        if winner_id == id_1:
+            if id_1 not in wins:
+                wins[id_1] = {}
+            wins[id_1][id_2] = True
+        elif winner_id == id_2:
+            if id_2 not in wins:
+                wins[id_2] = {}
+            wins[id_2][id_1] = True
+    
+    # Get all extractions
+    all_extractions = set(comparison_df['extraction_id_1'].tolist() + comparison_df['extraction_id_2'].tolist())
+    
+    # Check transitivity violations
+    total_triplets = 0
+    violations = 0
+    
+    for a in all_extractions:
+        for b in all_extractions:
+            for c in all_extractions:
+                if a != b and b != c and a != c:
+                    # Check if we have A > B and B > C
+                    a_beats_b = a in wins and b in wins[a]
+                    b_beats_c = b in wins and c in wins[b]
+                    
+                    if a_beats_b and b_beats_c:
+                        total_triplets += 1
+                        # Check if A > C (should be true for transitivity)
+                        a_beats_c = a in wins and c in wins[a]
+                        c_beats_a = c in wins and a in wins[c]
+                        
+                        # Violation if C beats A instead of A beating C
+                        if c_beats_a and not a_beats_c:
+                            violations += 1
+    
+    # Calculate score (0 to 1, where 1 = perfect transitivity)
+    if total_triplets == 0:
+        return 1.0  # No triplets to check = perfect by default
+    
+    return 1.0 - (violations / total_triplets)
+
+def show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_tests, total_comparisons):
+    """Show overview statistics"""
+    pd = _get_pandas()
+    
+    st.subheader("📊 Experiment Overview")
+    
+    # Key metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Cases Analyzed", n_cases)
+        st.metric("Tests Extracted", total_tests)
+    
+    with col2:
+        st.metric("Total Comparisons", total_comparisons)
+        decisive_rate = bradley_terry_stats['reliability_metrics']['decisiveness_rate']
+        st.metric("Decisive Comparisons", f"{decisive_rate:.1%}")
+    
+    with col3:
+        avg_confidence = bradley_terry_stats['reliability_metrics']['average_confidence']
+        st.metric("Avg Confidence", f"{avg_confidence:.2f}" if avg_confidence > 0 else "N/A")
+    
+    with col4:
+        transitivity = bradley_terry_stats['reliability_metrics']['transitivity_score']
+        st.metric("Transitivity Score", f"{transitivity:.2f}")
+    
+    # Distribution of test novelty
+    st.subheader("📈 Test Novelty Distribution")
+    
+    # Count novelty categories
+    novelty_counts = {}
+    for _, row in comparison_df.iterrows():
+        for novelty in [row['test_a_novelty'], row['test_b_novelty']]:
+            if novelty:
+                novelty_counts[novelty] = novelty_counts.get(novelty, 0) + 1
+    
+    if novelty_counts:
+        novelty_df = pd.DataFrame(list(novelty_counts.items()), columns=['Novelty Type', 'Count'])
+        st.bar_chart(novelty_df.set_index('Novelty Type'))
+    else:
+        st.info("No test novelty data available")
+
+def show_bradley_terry_rankings(comparison_df, bradley_terry_stats):
+    """Show Bradley-Terry rankings and scores"""
+    pd = _get_pandas()
+    
+    st.subheader("🏆 Bradley-Terry Rankings")
+    
+    # Get case information for each extraction
+    case_info = {}
+    for _, row in comparison_df.iterrows():
+        case_info[row['extraction_id_1']] = {
+            'case_name': row['case_a_name'],
+            'citation': row['case_a_citation'],
+            'year': row['case_a_year']
+        }
+        case_info[row['extraction_id_2']] = {
+            'case_name': row['case_b_name'],
+            'citation': row['case_b_citation'],
+            'year': row['case_b_year']
+        }
+    
+    # Create ranking table
+    ranking_data = []
+    for ext_id in bradley_terry_stats['extraction_ids']:
+        if ext_id in case_info:
+            ranking_data.append({
+                'Case': case_info[ext_id]['case_name'],
+                'Citation': case_info[ext_id]['citation'],
+                'Year': case_info[ext_id]['year'],
+                'Bradley-Terry Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
+                'Win Rate': bradley_terry_stats['win_percentages'][ext_id],
+                'Wins': bradley_terry_stats['wins'][ext_id],
+                'Losses': bradley_terry_stats['losses'][ext_id],
+                'Total Comparisons': bradley_terry_stats['total_comparisons'][ext_id]
+            })
+    
+    # Sort by Bradley-Terry score (descending)
+    ranking_df = pd.DataFrame(ranking_data)
+    ranking_df = ranking_df.sort_values('Bradley-Terry Score', ascending=False)
+    ranking_df.index = range(1, len(ranking_df) + 1)
+    
+    st.dataframe(ranking_df, use_container_width=True)
+    
+    # Interpretation
+    st.info("📊 **Interpretation:** Higher Bradley-Terry scores indicate more 'rule-like' legal tests. Lower scores indicate more 'standard-like' tests.")
+
+def show_temporal_analysis(comparison_df, bradley_terry_stats):
+    """Show temporal analysis and regression"""
+    pd = _get_pandas()
+    
+    st.subheader("📈 Temporal Analysis: Rule-Likeness Over Time")
+    
+    # Get case information with years and scores
+    case_data = []
+    case_info = {}
+    
+    # Build case info dictionary
+    for _, row in comparison_df.iterrows():
+        case_info[row['extraction_id_1']] = {
+            'case_name': row['case_a_name'],
+            'citation': row['case_a_citation'],
+            'year': row['case_a_year']
+        }
+        case_info[row['extraction_id_2']] = {
+            'case_name': row['case_b_name'],
+            'citation': row['case_b_citation'],
+            'year': row['case_b_year']
+        }
+    
+    # Create temporal dataset
+    for ext_id in bradley_terry_stats['extraction_ids']:
+        if ext_id in case_info and case_info[ext_id]['year']:
+            case_data.append({
+                'Case': case_info[ext_id]['case_name'],
+                'Year': case_info[ext_id]['year'],
+                'Rule_Likeness_Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
+                'Win_Rate': bradley_terry_stats['win_percentages'][ext_id]
+            })
+    
+    if not case_data:
+        st.warning("No temporal data available for analysis")
+        return
+    
+    temporal_df = pd.DataFrame(case_data)
+    
+    # Basic statistics
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Time Period:**")
+        min_year = temporal_df['Year'].min()
+        max_year = temporal_df['Year'].max()
+        st.write(f"From {min_year} to {max_year} ({max_year - min_year} years)")
+        st.write(f"Cases analyzed: {len(temporal_df)}")
+    
+    with col2:
+        st.write("**Rule-Likeness Statistics:**")
+        mean_score = temporal_df['Rule_Likeness_Score'].mean()
+        std_score = temporal_df['Rule_Likeness_Score'].std()
+        st.write(f"Mean rule-likeness: {mean_score:.3f}")
+        st.write(f"Standard deviation: {std_score:.3f}")
+    
+    # Regression analysis
+    st.subheader("📉 Regression Analysis")
+    
+    try:
+        # Simple linear regression
+        X = temporal_df['Year'].values
+        y = temporal_df['Rule_Likeness_Score'].values
+        
+        # Calculate regression coefficients
+        n = len(X)
+        x_mean = X.mean()
+        y_mean = y.mean()
+        
+        # Calculate slope and intercept
+        numerator = sum((X - x_mean) * (y - y_mean))
+        denominator = sum((X - x_mean) ** 2)
+        
+        if denominator != 0:
+            slope = numerator / denominator
+            intercept = y_mean - slope * x_mean
+            
+            # Calculate R-squared
+            y_pred = slope * X + intercept
+            ss_res = sum((y - y_pred) ** 2)
+            ss_tot = sum((y - y_mean) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+            
+            # Calculate standard error and p-value (simplified)
+            se_slope = (sum((y - y_pred) ** 2) / (n - 2)) ** 0.5 / (sum((X - x_mean) ** 2) ** 0.5)
+            t_stat = slope / se_slope if se_slope != 0 else 0
+            
+            # Display regression results
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Slope (β)", f"{slope:.6f}")
+                direction = "Increasing" if slope > 0 else "Decreasing" if slope < 0 else "Stable"
+                st.write(f"Trend: {direction}")
+            
+            with col2:
+                st.metric("R-squared", f"{r_squared:.4f}")
+                strength = "Strong" if r_squared > 0.7 else "Moderate" if r_squared > 0.3 else "Weak"
+                st.write(f"Relationship: {strength}")
+            
+            with col3:
+                st.metric("t-statistic", f"{t_stat:.3f}")
+                significance = "Significant" if abs(t_stat) > 2 else "Not significant"
+                st.write(f"Statistical: {significance}")
+            
+            # Interpretation
+            st.write("**Interpretation:**")
+            if slope > 0:
+                st.success(f"↗️ **Positive trend**: Legal tests are becoming more rule-like over time (slope: {slope:.6f})")
+            elif slope < 0:
+                st.error(f"↘️ **Negative trend**: Legal tests are becoming more standard-like over time (slope: {slope:.6f})")
+            else:
+                st.info("➡️ **No clear trend**: Rule-likeness remains relatively stable over time")
+            
+            # Interactive scatter plot with regression line
+            st.subheader("📊 Interactive Regression Plot")
+            
+            # Create chart data with proper year bounds
+            chart_data = temporal_df[['Year', 'Rule_Likeness_Score', 'Case']].copy()
+            chart_data['Regression_Line'] = slope * chart_data['Year'] + intercept
+            
+            # Display the combined chart
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                # Use Altair for better control over the visualization
+                try:
+                    import altair as alt
+                    
+                    # Base chart
+                    base = alt.Chart(chart_data).add_selection(
+                        alt.selection_interval(bind='scales')
+                    )
+                    
+                    # Scatter plot for actual data
+                    scatter = base.mark_circle(size=100, color='steelblue').encode(
+                        x=alt.X('Year:Q', scale=alt.Scale(domain=[1970, 2024]), title='Year'),
+                        y=alt.Y('Rule_Likeness_Score:Q', title='Rule-Likeness Score'),
+                        tooltip=['Case:N', 'Year:Q', 'Rule_Likeness_Score:Q']
+                    )
+                    
+                    # Regression line
+                    line = base.mark_line(color='red', strokeWidth=3).encode(
+                        x=alt.X('Year:Q'),
+                        y=alt.Y('Regression_Line:Q')
+                    )
+                    
+                    # Combine charts
+                    chart = (scatter + line).resolve_scale(y='shared')
+                    
+                    st.altair_chart(chart, use_container_width=True)
+                    
+                except ImportError:
+                    # Fallback to simpler chart if Altair not available
+                    st.line_chart(
+                        data=chart_data.set_index('Year')[['Rule_Likeness_Score', 'Regression_Line']]
+                    )
+                
+                st.caption("🔵 Blue dots: Actual Rule-Likeness Scores | 🔴 Red line: Regression Trend")
+            
+            with col2:
+                st.write("**Regression Equation:**")
+                st.code(f"y = {slope:.6f}x + {intercept:.3f}")
+                st.write("")
+                st.write("**Interpretation:**")
+                if slope > 0:
+                    st.write("📈 Positive trend")
+                    st.write("Tests becoming more rule-like")
+                elif slope < 0:
+                    st.write("📉 Negative trend") 
+                    st.write("Tests becoming more standard-like")
+                else:
+                    st.write("➡️ No clear trend")
+                
+                st.write("")
+                st.metric("R²", f"{r_squared:.4f}")
+                if r_squared > 0.7:
+                    st.success("Strong fit")
+                elif r_squared > 0.3:
+                    st.info("Moderate fit")
+                else:
+                    st.warning("Weak fit")
+            
+            # Show detailed data table
+            st.subheader("📋 Detailed Data")
+            detailed_data = chart_data.copy()
+            detailed_data['Residual'] = detailed_data['Rule_Likeness_Score'] - detailed_data['Regression_Line']
+            detailed_data = detailed_data.round(4)
+            st.dataframe(detailed_data, use_container_width=True)
+            
+        else:
+            st.warning("Cannot perform regression analysis: insufficient variation in years")
+    
+    except Exception as e:
+        st.error(f"Error in regression analysis: {str(e)}")
+
+def show_reliability_analysis(comparison_df, bradley_terry_stats):
+    """Show reliability and consistency analysis"""
+    pd = _get_pandas()
+    
+    st.subheader("🔍 Reliability Analysis")
+    
+    reliability = bradley_terry_stats['reliability_metrics']
+    
+    # Key reliability metrics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Comparisons", reliability['total_comparisons'])
+        st.metric("Decisive Comparisons", reliability['decisive_comparisons'])
+    
+    with col2:
+        decisiveness = reliability['decisiveness_rate']
+        st.metric("Decisiveness Rate", f"{decisiveness:.1%}")
+        
+        if decisiveness > 0.9:
+            st.success("Excellent decisiveness")
+        elif decisiveness > 0.7:
+            st.info("Good decisiveness")
+        else:
+            st.warning("Low decisiveness")
+    
+    with col3:
+        if reliability['average_confidence'] > 0:
+            st.metric("Average Confidence", f"{reliability['average_confidence']:.2f}")
+        else:
+            st.metric("Average Confidence", "N/A")
+    
+    # Detailed reliability assessment
+    st.subheader("📊 Reliability Assessment")
+    
+    # Consistency metrics
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Consistency Metrics:**")
+        transitivity = reliability['transitivity_score']
+        st.metric("Transitivity Score", f"{transitivity:.2f}")
+        
+        if transitivity > 0.8:
+            st.success("✅ High transitivity - results are logically consistent")
+        elif transitivity > 0.6:
+            st.info("⚠️ Moderate transitivity - some inconsistencies present")
+        else:
+            st.warning("❌ Low transitivity - significant inconsistencies detected")
+    
+    with col2:
+        st.write("**Temporal Consistency:**")
+        temporal_consistency = reliability['temporal_consistency']
+        temporal_note = reliability['temporal_consistency_note']
+        
+        if temporal_consistency is not None:
+            st.metric("Temporal Consistency", f"{temporal_consistency:.2f}")
+            
+            if temporal_consistency > 0.8:
+                st.success("✅ Results are stable over time")
+            elif temporal_consistency > 0.6:
+                st.info("⚠️ Moderate temporal stability")
+            else:
+                st.warning("❌ Results vary significantly over time")
+        else:
+            st.metric("Temporal Consistency", "N/A")
+        
+        st.caption(f"📝 {temporal_note}")
+    
+    # Recommendations
+    st.subheader("💡 Recommendations")
+    
+    recommendations = []
+    
+    if decisiveness < 0.7:
+        recommendations.append("• **Low decisiveness**: Consider refining comparison prompts or criteria")
+    
+    if transitivity < 0.7:
+        recommendations.append("• **Low transitivity**: Review comparison consistency and consider additional training")
+    
+    if reliability['average_confidence'] < 0.7 and reliability['average_confidence'] > 0:
+        recommendations.append("• **Low confidence**: Results may need manual validation")
+    
+    if len(comparison_df) < 100:
+        recommendations.append("• **Small sample**: Consider increasing the number of comparisons for more robust results")
+    
+    if recommendations:
+        for rec in recommendations:
+            st.write(rec)
+    else:
+        st.success("✅ **Excellent reliability**: Your comparison results appear robust and consistent!")
+    
+    # Show comparison distribution
+    st.subheader("📈 Comparison Distribution")
+    
+    # Year distribution of comparisons
+    year_data = []
+    for _, row in comparison_df.iterrows():
+        year_data.extend([row['case_a_year'], row['case_b_year']])
+    
+    if year_data:
+        year_df = pd.DataFrame({'Year': year_data})
+        year_counts = year_df['Year'].value_counts().sort_index()
+        
+        if len(year_counts) > 1:
+            st.bar_chart(year_counts)
+        else:
+            st.info("All cases are from the same year")
+    else:
+        st.info("No year data available for distribution analysis")
+
+def show_advanced_reliability_metrics(comparison_df, bradley_terry_stats):
+    """Show advanced statistical reliability metrics for Bradley-Terry model"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    st.subheader("📈 Advanced Statistical Reliability")
+    
+    # Check if advanced metrics are available
+    if 'confidence_intervals' not in bradley_terry_stats:
+        st.error("Advanced reliability metrics not available. Please re-run the analysis.")
+        return
+    
+    ci_data = bradley_terry_stats['confidence_intervals']
+    significance_data = bradley_terry_stats.get('significance_tests', {})
+    separation_data = bradley_terry_stats.get('separation_reliability', {})
+    diagnostics_data = bradley_terry_stats.get('model_diagnostics', {})
+    
+    # Create tabs for different types of advanced metrics
+    reliability_tab1, reliability_tab2, reliability_tab3, reliability_tab4 = st.tabs([
+        "📊 Confidence Intervals", "🧪 Statistical Significance", "📏 Item Separation", "🔬 Model Diagnostics"
+    ])
+    
+    with reliability_tab1:
+        show_confidence_intervals_analysis(comparison_df, bradley_terry_stats, ci_data)
+    
+    with reliability_tab2:
+        show_significance_analysis(comparison_df, bradley_terry_stats, significance_data)
+    
+    with reliability_tab3:
+        show_separation_reliability_analysis(separation_data)
+    
+    with reliability_tab4:
+        show_model_diagnostics_analysis(diagnostics_data)
+    
+    # Add export functionality
+    st.markdown("---")
+    st.subheader("📥 Export Statistical Summary")
+    
+    if st.button("Generate Export Table"):
+        try:
+            summary_df, model_stats = create_exportable_summary_table(bradley_terry_stats, comparison_df)
+            
+            # Display preview
+            st.write("**Preview of Export Data:**")
+            st.dataframe(summary_df.head(10), use_container_width=True)
+            
+            # Convert to CSV for download
+            csv = summary_df.to_csv(index=False)
+            
+            # Create model statistics summary
+            model_summary = "\n".join([f"{k}: {v}" for k, v in model_stats.items()])
+            
+            # Combine data and metadata
+            full_export = f"# Bradley-Terry Statistical Analysis Summary\n\n## Model Statistics\n{model_summary}\n\n## Individual Item Results\n{csv}"
+            
+            st.download_button(
+                label="📥 Download Statistical Summary (CSV)",
+                data=full_export,
+                file_name=f"bradley_terry_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
+            
+            st.success("✅ Export table generated successfully!")
+            
+        except Exception as e:
+            st.error(f"Error generating export: {str(e)}")
+
+def show_confidence_intervals_analysis(comparison_df, bradley_terry_stats, ci_data):
+    """Show confidence interval analysis"""
+    pd = _get_pandas()
+    
+    st.subheader("📊 Confidence Intervals & Standard Errors")
+    
+    if 'warning' in ci_data or 'error' in ci_data:
+        st.warning(f"Limited confidence interval data: {ci_data.get('warning', ci_data.get('error', ''))}")
+    
+    # Get case information
+    case_info = {}
+    for _, row in comparison_df.iterrows():
+        case_info[row['extraction_id_1']] = {
+            'case_name': row['case_a_name'],
+            'citation': row['case_a_citation'],
+            'year': row['case_a_year']
+        }
+        case_info[row['extraction_id_2']] = {
+            'case_name': row['case_b_name'],
+            'citation': row['case_b_citation'],
+            'year': row['case_b_year']
+        }
+    
+    # Create confidence interval table
+    ci_table_data = []
+    for ext_id in bradley_terry_stats['extraction_ids']:
+        if ext_id in case_info and ext_id in ci_data['confidence_intervals']:
+            ci_info = ci_data['confidence_intervals'][ext_id]
+            se = ci_data['standard_errors'].get(ext_id, 0)
+            
+            ci_table_data.append({
+                'Case': case_info[ext_id]['case_name'],
+                'Citation': case_info[ext_id]['citation'],
+                'Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
+                'Standard Error': se,
+                'Lower 95% CI': ci_info['lower'],
+                'Upper 95% CI': ci_info['upper'],
+                'Margin Error': ci_info['margin_error'],
+                'CI Width': ci_info['upper'] - ci_info['lower']
+            })
+    
+    if ci_table_data:
+        ci_df = pd.DataFrame(ci_table_data)
+        ci_df = ci_df.sort_values('Score', ascending=False)
+        
+        # Display summary statistics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            avg_se = ci_df['Standard Error'].mean()
+            st.metric("Average Standard Error", f"{avg_se:.4f}")
+        
+        with col2:
+            avg_width = ci_df['CI Width'].mean()
+            st.metric("Average CI Width", f"{avg_width:.4f}")
+        
+        with col3:
+            precision_score = 1 / (1 + avg_width) if avg_width > 0 else 1
+            st.metric("Precision Index", f"{precision_score:.3f}")
+        
+        # Show table
+        st.subheader("📋 Detailed Confidence Intervals")
+        st.dataframe(ci_df.round(4), use_container_width=True)
+        
+        # Interpretation
+        st.subheader("💡 Interpretation")
+        narrow_cis = sum(1 for width in ci_df['CI Width'] if width < avg_width * 0.8)
+        total_items = len(ci_df)
+        
+        if narrow_cis / total_items > 0.7:
+            st.success(f"✅ **High precision**: {narrow_cis}/{total_items} items have narrow confidence intervals")
+        elif narrow_cis / total_items > 0.4:
+            st.info(f"⚠️ **Moderate precision**: {narrow_cis}/{total_items} items have narrow confidence intervals")
+        else:
+            st.warning(f"❌ **Low precision**: Only {narrow_cis}/{total_items} items have narrow confidence intervals")
+    
+    else:
+        st.warning("No confidence interval data available")
+
+def show_significance_analysis(comparison_df, bradley_terry_stats, significance_data):
+    """Show statistical significance analysis"""
+    pd = _get_pandas()
+    
+    st.subheader("🧪 Statistical Significance Testing")
+    
+    if 'warning' in significance_data:
+        st.warning(f"Limited significance data: {significance_data['warning']}")
+        return
+    
+    # Summary statistics
+    significant_pairs = significance_data.get('significant_pairs', [])
+    bonferroni_significant = significance_data.get('bonferroni_significant', [])
+    n_comparisons = significance_data.get('n_comparisons', 0)
+    alpha = significance_data.get('alpha', 0.05)
+    bonferroni_alpha = significance_data.get('bonferroni_alpha', alpha)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Pairwise Tests", n_comparisons)
+        st.metric("Significant (p < 0.05)", len(significant_pairs))
+    
+    with col2:
+        st.metric("Bonferroni α", f"{bonferroni_alpha:.6f}")
+        st.metric("Bonferroni Significant", len(bonferroni_significant))
+    
+    with col3:
+        if n_comparisons > 0:
+            sig_rate = len(significant_pairs) / n_comparisons
+            st.metric("Significance Rate", f"{sig_rate:.1%}")
+        
+        discovery_rate = len(bonferroni_significant) / len(significant_pairs) if significant_pairs else 0
+        st.metric("Corrected Discovery Rate", f"{discovery_rate:.1%}")
+    
+    # Show significant pairs
+    if bonferroni_significant:
+        st.subheader("🏆 Statistically Significant Differences (Bonferroni Corrected)")
+        
+        # Get case names for display
+        case_info = {}
+        for _, row in comparison_df.iterrows():
+            case_info[row['extraction_id_1']] = row['case_a_name']
+            case_info[row['extraction_id_2']] = row['case_b_name']
+        
+        sig_table = []
+        for pair in bonferroni_significant[:20]:  # Show top 20
+            item1_name = case_info.get(pair['item_1'], f"Item {pair['item_1']}")
+            item2_name = case_info.get(pair['item_2'], f"Item {pair['item_2']}")
+            
+            sig_table.append({
+                'Higher Ranked': item1_name,
+                'Lower Ranked': item2_name,
+                'Score Difference': pair['score_diff'],
+                'Z-statistic': pair['z_statistic'],
+                'P-value': pair['p_value']
+            })
+        
+        sig_df = pd.DataFrame(sig_table)
+        st.dataframe(sig_df.round(6), use_container_width=True)
+    
+    else:
+        st.info("No statistically significant differences found after Bonferroni correction.")
+    
+    # Interpretation
+    st.subheader("💡 Statistical Interpretation")
+    
+    if len(bonferroni_significant) > 0:
+        st.success(f"✅ **Strong evidence**: {len(bonferroni_significant)} pairwise differences are statistically significant even after correcting for multiple comparisons.")
+    elif len(significant_pairs) > 0:
+        st.warning(f"⚠️ **Weak evidence**: {len(significant_pairs)} differences significant at α=0.05 but none survive multiple comparison correction.")
+    else:
+        st.error("❌ **No evidence**: No statistically significant differences detected.")
+
+def show_separation_reliability_analysis(separation_data):
+    """Show item separation reliability analysis"""
+    st.subheader("📏 Item Separation Reliability")
+    
+    if 'error' in separation_data or 'warning' in separation_data:
+        st.warning(f"Limited separation data: {separation_data.get('error', separation_data.get('warning', ''))}")
+        return
+    
+    # Key metrics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        separation_coef = separation_data.get('separation_coefficient', 0)
+        st.metric("Separation Coefficient", f"{separation_coef:.3f}")
+    
+    with col2:
+        reliability = separation_data.get('reliability', 0)
+        st.metric("Separation Reliability", f"{reliability:.3f}")
+    
+    with col3:
+        strata = separation_data.get('estimated_strata', 1)
+        st.metric("Estimated Strata", strata)
+    
+    # Interpretation
+    interpretation = separation_data.get('interpretation', 'Unknown')
+    
+    if reliability > 0.9:
+        st.success(f"✅ **{interpretation}**: The model clearly distinguishes {strata} distinct performance levels.")
+    elif reliability > 0.8:
+        st.info(f"⚠️ **{interpretation}**: The model reliably separates items into {strata} levels.")
+    elif reliability > 0.7:
+        st.warning(f"⚠️ **{interpretation}**: The model shows acceptable separation into {strata} levels.")
+    else:
+        st.error(f"❌ **{interpretation}**: The model has difficulty reliably separating items.")
+    
+    # Additional details
+    st.subheader("📊 Separation Analysis Details")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Variance Components:**")
+        true_var = separation_data.get('true_variance', 0)
+        error_var = separation_data.get('error_variance', 0)
+        
+        st.write(f"• True Score Variance: {true_var:.6f}")
+        st.write(f"• Error Variance: {error_var:.6f}")
+        
+        if true_var > 0 and error_var > 0:
+            signal_noise_ratio = true_var / error_var
+            st.write(f"• Signal-to-Noise Ratio: {signal_noise_ratio:.3f}")
+    
+    with col2:
+        st.write("**Reliability Benchmarks:**")
+        st.write("• > 0.9: Excellent separation (3-4+ strata)")
+        st.write("• > 0.8: Good separation (2-3 strata)")
+        st.write("• > 0.7: Acceptable separation")
+        st.write("• < 0.7: Poor separation")
+
+def show_model_diagnostics_analysis(diagnostics_data):
+    """Show model diagnostics and goodness-of-fit analysis"""
+    st.subheader("🔬 Model Diagnostics")
+    
+    if 'error' in diagnostics_data:
+        st.warning(f"Limited diagnostic data: {diagnostics_data['error']}")
+        return
+    
+    # Key diagnostic metrics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        deviance = diagnostics_data.get('deviance', 0)
+        st.metric("Deviance", f"{deviance:.2f}")
+        
+        pearson_chi2 = diagnostics_data.get('pearson_chi2', 0)
+        st.metric("Pearson χ²", f"{pearson_chi2:.2f}")
+    
+    with col2:
+        overdispersion = diagnostics_data.get('overdispersion_ratio', 1)
+        st.metric("Overdispersion Ratio", f"{overdispersion:.3f}")
+        
+        df = diagnostics_data.get('degrees_freedom', 0)
+        st.metric("Degrees of Freedom", df)
+    
+    with col3:
+        dev_p = diagnostics_data.get('deviance_p_value', 1)
+        st.metric("Deviance p-value", f"{dev_p:.4f}")
+        
+        pearson_p = diagnostics_data.get('pearson_p_value', 1)
+        st.metric("Pearson p-value", f"{pearson_p:.4f}")
+    
+    # Interpretation
+    interpretation = diagnostics_data.get('interpretation', 'Unknown')
+    
+    if overdispersion > 2:
+        st.error(f"❌ **{interpretation}**: Model may be inadequate for the data.")
+    elif overdispersion > 1.5:
+        st.warning(f"⚠️ **{interpretation}**: Some model inadequacy detected.")
+    elif overdispersion < 0.5:
+        st.info(f"⚠️ **{interpretation}**: Possible model over-fitting.")
+    else:
+        st.success(f"✅ **{interpretation}**: Model fits the data appropriately.")
+    
+    # Goodness-of-fit assessment
+    st.subheader("📈 Goodness-of-Fit Assessment")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Deviance Test:**")
+        if dev_p < 0.001:
+            st.error("Strong evidence of poor fit (p < 0.001)")
+        elif dev_p < 0.05:
+            st.warning("Evidence of poor fit (p < 0.05)")
+        else:
+            st.success("No evidence of poor fit (p ≥ 0.05)")
+    
+    with col2:
+        st.write("**Pearson Test:**")
+        if pearson_p < 0.001:
+            st.error("Strong evidence of poor fit (p < 0.001)")
+        elif pearson_p < 0.05:
+            st.warning("Evidence of poor fit (p < 0.05)")
+        else:
+            st.success("No evidence of poor fit (p ≥ 0.05)")
+    
+    # Additional model information
+    st.subheader("📋 Model Information")
+    n_comparisons = diagnostics_data.get('n_comparisons', 0)
+    n_parameters = diagnostics_data.get('n_parameters', 0)
+    
+    st.write(f"• Number of pairwise comparisons: {n_comparisons}")
+    st.write(f"• Number of model parameters: {n_parameters}")
+    st.write(f"• Degrees of freedom: {df}")
+    
+    if n_comparisons > 0 and n_parameters > 0:
+        data_param_ratio = n_comparisons / n_parameters
+        st.write(f"• Data-to-parameter ratio: {data_param_ratio:.1f}")
+        
+        if data_param_ratio < 5:
+            st.warning("⚠️ Low data-to-parameter ratio may affect reliability")
+        else:
+            st.success("✅ Adequate data-to-parameter ratio")
+
+def create_exportable_summary_table(bradley_terry_stats, comparison_df):
+    """Create exportable statistical summary table for academic use"""
+    pd = _get_pandas()
+    
+    # Get case information
+    case_info = {}
+    for _, row in comparison_df.iterrows():
+        case_info[row['extraction_id_1']] = {
+            'case_name': row['case_a_name'],
+            'citation': row['case_a_citation'],
+            'year': row['case_a_year']
+        }
+        case_info[row['extraction_id_2']] = {
+            'case_name': row['case_b_name'],
+            'citation': row['case_b_citation'],
+            'year': row['case_b_year']
+        }
+    
+    # Build comprehensive summary table
+    summary_data = []
+    
+    ci_data = bradley_terry_stats.get('confidence_intervals', {})
+    sep_data = bradley_terry_stats.get('separation_reliability', {})
+    diag_data = bradley_terry_stats.get('model_diagnostics', {})
+    
+    for ext_id in bradley_terry_stats['extraction_ids']:
+        if ext_id in case_info:
+            ci_info = ci_data.get('confidence_intervals', {}).get(ext_id, {})
+            se = ci_data.get('standard_errors', {}).get(ext_id, 0)
+            
+            summary_data.append({
+                'Case_Name': case_info[ext_id]['case_name'],
+                'Citation': case_info[ext_id]['citation'],
+                'Decision_Year': case_info[ext_id]['year'],
+                'Bradley_Terry_Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
+                'Standard_Error': se,
+                'Lower_95_CI': ci_info.get('lower', 0),
+                'Upper_95_CI': ci_info.get('upper', 0),
+                'Win_Rate': bradley_terry_stats['win_percentages'][ext_id],
+                'Total_Comparisons': bradley_terry_stats['total_comparisons'][ext_id]
+            })
+    
+    summary_df = pd.DataFrame(summary_data)
+    
+    # Add model-level statistics as metadata
+    model_stats = {
+        'Separation_Reliability': sep_data.get('reliability', 0),
+        'Separation_Coefficient': sep_data.get('separation_coefficient', 0),
+        'Estimated_Strata': sep_data.get('estimated_strata', 1),
+        'Overdispersion_Ratio': diag_data.get('overdispersion_ratio', 1),
+        'Model_Deviance': diag_data.get('deviance', 0),
+        'Degrees_Freedom': diag_data.get('degrees_freedom', 0),
+        'Total_Items': len(bradley_terry_stats['extraction_ids']),
+        'Total_Comparisons': bradley_terry_stats['reliability_metrics']['total_comparisons']
+    }
+    
+    return summary_df, model_stats
+
 def run_extraction_for_experiment(experiment_id):
     """Execute legal test extraction for an experiment"""
     try:
@@ -2498,26 +4019,132 @@ def show_experiment_detail(experiment_id):
                     'validation_status', 'decision_url'
                 ])
                 
-                # Display table with proper formatting
-                st.write(f"**Total Extractions:** {len(df)}")
+                # Add search, filter, and sort controls
+                st.markdown("### 🔍 Search & Filter Controls")
                 
-                # Create display columns with proper formatting
-                for idx, row in df.iterrows():
-                    with st.expander(f"**{row['case_name']}** ({row['citation']})", expanded=False):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    search_term = st.text_input(
+                        "🔍 Search by case name",
+                        placeholder="Type case name...",
+                        key="extraction_search"
+                    )
+                
+                with col2:
+                    # Get unique validation statuses
+                    unique_statuses = df['validation_status'].dropna().unique().tolist()
+                    status_filter = st.selectbox(
+                        "📋 Filter by status",
+                        ["All"] + unique_statuses,
+                        key="extraction_status_filter"
+                    )
+                
+                with col3:
+                    # Get unique test novelty types
+                    unique_novelties = df['test_novelty'].dropna().unique().tolist()
+                    novelty_filter = st.selectbox(
+                        "🆕 Filter by novelty",
+                        ["All"] + unique_novelties,
+                        key="extraction_novelty_filter"
+                    )
+                
+                # Sort controls
+                col4, col5 = st.columns(2)
+                
+                with col4:
+                    sort_by = st.selectbox(
+                        "📊 Sort by",
+                        ["Case Name", "Rule-like Score", "Confidence Score", "Status"],
+                        key="extraction_sort_by"
+                    )
+                
+                with col5:
+                    sort_order = st.selectbox(
+                        "🔄 Order",
+                        ["Ascending", "Descending"],
+                        key="extraction_sort_order"
+                    )
+                
+                # Apply filters
+                filtered_df = df.copy()
+                
+                # Search filter
+                if search_term:
+                    filtered_df = filtered_df[filtered_df['case_name'].str.contains(search_term, case=False, na=False)]
+                
+                # Status filter
+                if status_filter != "All":
+                    filtered_df = filtered_df[filtered_df['validation_status'] == status_filter]
+                
+                # Novelty filter
+                if novelty_filter != "All":
+                    filtered_df = filtered_df[filtered_df['test_novelty'] == novelty_filter]
+                
+                # Apply sorting
+                sort_column_map = {
+                    "Case Name": "case_name",
+                    "Rule-like Score": "rule_like_score", 
+                    "Confidence Score": "confidence_score",
+                    "Status": "validation_status"
+                }
+                sort_column = sort_column_map[sort_by]
+                ascending = sort_order == "Ascending"
+                
+                # Handle NaN values in sorting
+                if sort_column in ["rule_like_score", "confidence_score"]:
+                    filtered_df = filtered_df.sort_values(sort_column, ascending=ascending, na_position='last')
+                else:
+                    filtered_df = filtered_df.sort_values(sort_column, ascending=ascending)
+                
+                # Display results summary
+                st.markdown("---")
+                col_summary1, col_summary2 = st.columns(2)
+                with col_summary1:
+                    st.write(f"**Showing {len(filtered_df)} of {len(df)} extractions**")
+                with col_summary2:
+                    if len(filtered_df) > 0:
+                        avg_rule_score = filtered_df['rule_like_score'].mean()
+                        st.write(f"**Average Rule-like Score:** {avg_rule_score:.2f}" if not pd.isna(avg_rule_score) else "**Average Rule-like Score:** N/A")
+                
+                # Create display with filtered results
+                for idx, row in filtered_df.iterrows():
+                    # Create enhanced expander title with key info
+                    rule_score_text = f" | Rule-like: {row['rule_like_score']:.2f}" if row['rule_like_score'] else ""
+                    status_text = f" | {row['validation_status']}" if row['validation_status'] else ""
+                    expander_title = f"**{row['case_name']}** ({row['citation']}){rule_score_text}{status_text}"
+                    
+                    with st.expander(expander_title, expanded=False):
                         col1, col2 = st.columns([2, 1])
                         
                         with col1:
                             st.write("**Legal Test:**")
                             st.write(row['legal_test_content'])
+                            
+                            if row['extraction_rationale']:
+                                st.write("**AI Rationale:**")
+                                st.write(row['extraction_rationale'])
+                            
                             st.write("**Test Location:**")
                             st.write(row['test_passages'] if row['test_passages'] else "Not available")
+                            
                             st.write("**Test Novelty:**")
                             st.write(row['test_novelty'] if row['test_novelty'] else "Not available")
                             
                         with col2:
                             st.metric("Rule-like Score", f"{row['rule_like_score']:.2f}" if row['rule_like_score'] else "N/A")
                             st.metric("Confidence", f"{row['confidence_score']:.2f}" if row['confidence_score'] else "N/A")
-                            st.write(f"**Status:** {row['validation_status']}")
+                            
+                            # Status with color coding
+                            status = row['validation_status']
+                            if status == 'accurate':
+                                st.success(f"✅ {status}")
+                            elif status == 'inaccurate':
+                                st.error(f"❌ {status}")
+                            elif status == 'pending_review':
+                                st.warning(f"⏳ {status}")
+                            else:
+                                st.write(f"**Status:** {status}")
                             
                             if row['decision_url']:
                                 st.link_button("📖 View Case", row['decision_url'])
@@ -2541,7 +4168,11 @@ def show_experiment_detail(experiment_id):
                     winner_case.case_name as winner_case_name,
                     ec.comparison_rationale,
                     ec.confidence_score,
-                    ec.human_validated
+                    ec.human_validated,
+                    ec.comparison_date,
+                    ec.winner_id,
+                    ee1.extraction_id as extraction_id_1,
+                    ee2.extraction_id as extraction_id_2
                 FROM v2_experiment_comparisons ec
                 JOIN v2_experiment_extractions ee1 ON ec.extraction_id_1 = ee1.extraction_id
                 JOIN v2_experiment_extractions ee2 ON ec.extraction_id_2 = ee2.extraction_id
@@ -2556,48 +4187,164 @@ def show_experiment_detail(experiment_id):
             if not comparisons:
                 st.info("No comparisons found for this experiment yet. Run comparisons first.")
             else:
-                st.write(f"**Total Comparisons:** {len(comparisons)}")
+                # Process comparisons data for filtering and stats
+                processed_comparisons = []
+                test_a_wins = 0
+                test_b_wins = 0
+                no_winner = 0
                 
-                # Display comparisons
                 for idx, comp in enumerate(comparisons):
-                    with st.expander(f"**Comparison {idx + 1}:** {comp[1]} vs {comp[2]}", expanded=False):
-                        col1, col2 = st.columns(2)
+                    comparison_id, case_a_name, case_b_name, case_a_citation, case_b_citation, test_a, test_b, winner_case_name, comparison_rationale, confidence_score, human_validated, comparison_date, winner_id, extraction_id_1, extraction_id_2 = comp
+                    
+                    # Format the date
+                    if comparison_date:
+                        if isinstance(comparison_date, str):
+                            formatted_date = comparison_date[:10]
+                        else:
+                            formatted_date = comparison_date.strftime('%Y-%m-%d')
+                    else:
+                        formatted_date = "Unknown"
+                    
+                    # Determine winner display
+                    if winner_id == extraction_id_1:
+                        winner_text = case_a_name
+                        winner_label = "Test A"
+                        test_a_wins += 1
+                    elif winner_id == extraction_id_2:
+                        winner_text = case_b_name
+                        winner_label = "Test B"
+                        test_b_wins += 1
+                    else:
+                        winner_text = "No winner determined"
+                        winner_label = "N/A"
+                        no_winner += 1
+                    
+                    processed_comparisons.append({
+                        'idx': idx,
+                        'comparison_id': comparison_id,
+                        'case_a_name': case_a_name,
+                        'case_b_name': case_b_name,
+                        'case_a_citation': case_a_citation,
+                        'case_b_citation': case_b_citation,
+                        'test_a': test_a,
+                        'test_b': test_b,
+                        'winner_text': winner_text,
+                        'winner_label': winner_label,
+                        'comparison_rationale': comparison_rationale,
+                        'confidence_score': confidence_score,
+                        'human_validated': human_validated,
+                        'formatted_date': formatted_date,
+                        'comparison_date': comparison_date
+                    })
+                
+                # Header with stats and controls
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col1:
+                    st.write(f"**Total Comparisons:** {len(comparisons)}")
+                    st.write(f"**Quick Stats:** Test A wins: {test_a_wins}, Test B wins: {test_b_wins}, No winner: {no_winner}")
+                
+                with col2:
+                    # Search functionality
+                    search_term = st.text_input("🔍 Search by case name", placeholder="Enter case name...")
+                
+                with col3:
+                    # Filter by winner
+                    winner_filter = st.selectbox(
+                        "Filter by winner",
+                        ["All", "Test A", "Test B", "No winner"]
+                    )
+                
+                # Sort options
+                sort_option = st.selectbox(
+                    "Sort by",
+                    ["Date (newest first)", "Date (oldest first)", "Case A name", "Case B name"]
+                )
+                
+                # Apply filters and sorting
+                filtered_comparisons = processed_comparisons.copy()
+                
+                # Apply search filter
+                if search_term:
+                    filtered_comparisons = [
+                        comp for comp in filtered_comparisons 
+                        if search_term.lower() in comp['case_a_name'].lower() or 
+                           search_term.lower() in comp['case_b_name'].lower()
+                    ]
+                
+                # Apply winner filter
+                if winner_filter != "All":
+                    if winner_filter == "No winner":
+                        filtered_comparisons = [comp for comp in filtered_comparisons if comp['winner_label'] == "N/A"]
+                    else:
+                        filtered_comparisons = [comp for comp in filtered_comparisons if comp['winner_label'] == winner_filter]
+                
+                # Apply sorting
+                if sort_option == "Date (newest first)":
+                    filtered_comparisons.sort(key=lambda x: x['comparison_date'] or "", reverse=True)
+                elif sort_option == "Date (oldest first)":
+                    filtered_comparisons.sort(key=lambda x: x['comparison_date'] or "")
+                elif sort_option == "Case A name":
+                    filtered_comparisons.sort(key=lambda x: x['case_a_name'])
+                elif sort_option == "Case B name":
+                    filtered_comparisons.sort(key=lambda x: x['case_b_name'])
+                
+                # Show filtered count
+                if len(filtered_comparisons) != len(comparisons):
+                    st.info(f"Showing {len(filtered_comparisons)} of {len(comparisons)} comparisons")
+                
+                st.write("---")
+                
+                # Display filtered comparisons in collapsible format
+                for comp in filtered_comparisons:
+                    # Create informative expander title
+                    winner_info = f"→ Winner: {comp['winner_text']} ({comp['winner_label']})" if comp['winner_label'] != "N/A" else "→ No winner"
+                    expander_title = f"**Comparison #{comp['idx'] + 1}:** {comp['case_a_name']} vs {comp['case_b_name']} {winner_info}"
+                    
+                    with st.expander(expander_title, expanded=False):
+                        # Header with AI badge and date
+                        col_header1, col_header2 = st.columns([4, 1])
+                        with col_header1:
+                            st.markdown(f"**Comparison #{comp['idx'] + 1} - AI_Generated**")
+                        with col_header2:
+                            st.markdown(f"**{comp['formatted_date']}**")
+                            st.markdown("🤖 AI")
+                        
+                        # Main comparison layout
+                        col1, col2, col3 = st.columns([2, 2, 1])
                         
                         with col1:
-                            st.write(f"**Case A: {comp[1]}** ({comp[3]})")
-                            st.write("**Legal Test:**")
-                            st.write(comp[5])
+                            st.markdown("📋 **Test A:**")
+                            st.markdown(f"*{comp['case_a_name']}* ({comp['case_a_citation']})")
+                            st.markdown("**Test:** " + comp['test_a'])
                             
                         with col2:
-                            st.write(f"**Case B: {comp[2]}** ({comp[4]})")
-                            st.write("**Legal Test:**")
-                            st.write(comp[6])
-                        
-                        st.write("---")
-                        col3, col4 = st.columns([2, 1])
-                        
-                        with col3:
-                            st.write(f"**Winner:** {comp[7] if comp[7] else 'No winner determined'}")
-                            st.write("**Explanation:**")
-                            st.write(comp[8] if comp[8] else "No explanation provided")
+                            st.markdown("📋 **Test B:**")
+                            st.markdown(f"*{comp['case_b_name']}* ({comp['case_b_citation']})")
+                            st.markdown("**Test:** " + comp['test_b'])
                             
-                        with col4:
-                            st.metric("Confidence", f"{comp[9]:.2f}" if comp[9] else "N/A")
-                            st.write(f"**Human Validated:** {'Yes' if comp[10] else 'No'}")
+                        with col3:
+                            st.markdown("🏆 **Winner:**")
+                            if comp['winner_label'] != "N/A":
+                                st.markdown(f"<div style='background-color: #d4edda; padding: 10px; border-radius: 5px; text-align: center;'><strong style='color: #155724;'>{comp['winner_text']}</strong><br><small>More Rule-Like</small></div>", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"<div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; text-align: center;'><strong>{comp['winner_text']}</strong></div>", unsafe_allow_html=True)
+                        
+                        # Reasoning section
+                        st.markdown("🧠 **Reasoning:**")
+                        st.markdown(comp['comparison_rationale'] if comp['comparison_rationale'] else "No reasoning provided")
         
         with tab6:
             # Results tab
             st.subheader("📊 Analysis Results")
-            st.info("🚧 Bradley-Terry analysis and visualization functionality will be implemented here.")
             
-            # Placeholder for results
-            if total_tests > 0 and total_comparisons > 0:
-                st.write("**Analysis Overview:**")
-                st.metric("Total Tests Analyzed", total_tests)
-                st.metric("Total Comparisons", total_comparisons)
-                st.write("Detailed Bradley-Terry scoring and temporal analysis will be available here.")
+            if total_tests == 0 or total_comparisons == 0:
+                st.info("Complete extractions and comparisons to view detailed analysis results.")
+                st.write("**Current Progress:**")
+                st.write(f"- Tests Extracted: {total_tests}/{n_cases}")
+                st.write(f"- Comparisons Made: {total_comparisons}/{required_comparisons}")
             else:
-                st.write("Complete extractions and comparisons to view analysis results.")
+                # Comprehensive Bradley-Terry Analysis
+                show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_comparisons)
         
         with tab7:
             st.subheader("⚙️ Experiment Settings")
