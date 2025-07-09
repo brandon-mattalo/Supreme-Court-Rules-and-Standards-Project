@@ -18,25 +18,28 @@ def calculate_bradley_terry_comparisons(n_cases=None):
     Returns:
     - required_comparisons: Number of comparisons needed for Bradley-Terry analysis
     """
-    # Try to use actual block structure first
+    # Try to use actual block structure first, but only if n_cases matches the structure
     try:
         structure = get_bradley_terry_structure()
-        if structure:
-            # Calculate exact comparisons from actual block structure
-            blocks = {}
-            for case in structure:
-                block_num = case['block_number']
-                if block_num not in blocks:
-                    blocks[block_num] = []
-                blocks[block_num].append(case['case_id'])
-            
-            total_comparisons = 0
-            for block_cases in blocks.values():
-                block_size = len(block_cases)
-                block_comparisons = (block_size * (block_size - 1)) // 2
-                total_comparisons += block_comparisons
-            
-            return total_comparisons
+        if structure and n_cases is not None:
+            # Check if the structure matches the requested n_cases
+            unique_cases = set(case['case_id'] for case in structure)
+            if len(unique_cases) == n_cases:
+                # Calculate exact comparisons from actual block structure
+                blocks = {}
+                for case in structure:
+                    block_num = case['block_number']
+                    if block_num not in blocks:
+                        blocks[block_num] = []
+                    blocks[block_num].append(case['case_id'])
+                
+                total_comparisons = 0
+                for block_cases in blocks.values():
+                    block_size = len(block_cases)
+                    block_comparisons = (block_size * (block_size - 1)) // 2
+                    total_comparisons += block_comparisons
+                
+                return total_comparisons
     except:
         # Fall back to mathematical calculation if structure unavailable
         pass
@@ -339,6 +342,23 @@ def clear_database():
         return True
     except Exception as e:
         st.error(f"Error clearing database: {e}")
+        return False
+
+def clear_selected_cases():
+    """Clear all selected cases for experiments (preserves main case database)"""
+    try:
+        # Clear tables that depend on selected cases
+        execute_sql("DELETE FROM v2_bradley_terry_structure")
+        execute_sql("DELETE FROM v2_experiment_selected_cases")
+        
+        # Clear caches after modifying data
+        get_experiment_selected_cases.clear()
+        _cached_database_counts.clear()
+        
+        st.success("All selected experiment cases cleared! Main case database preserved.")
+        return True
+    except Exception as e:
+        st.error(f"Error clearing selected cases: {e}")
         return False
 
 # Cache case summary for 60 seconds

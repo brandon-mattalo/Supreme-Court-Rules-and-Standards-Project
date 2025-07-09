@@ -300,7 +300,14 @@ def show():
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Experiment:** {experiment['name']}")
     st.sidebar.markdown(f"**ID:** {experiment['experiment_id']}")
-    st.sidebar.markdown(f"**Created:** {experiment['created_date'][:10]}")
+    # Format datetime properly
+    created_date = experiment['created_date']
+    if isinstance(created_date, str):
+        created_date_str = created_date[:10]
+    else:
+        created_date_str = created_date.strftime('%Y-%m-%d') if created_date else 'Unknown'
+    
+    st.sidebar.markdown(f"**Created:** {created_date_str}")
     
     # Quick actions
     st.sidebar.subheader("🚀 Quick Actions")
