@@ -3001,9 +3001,52 @@ def show_case_management():
         selected_cases_df = get_experiment_selected_cases()
         if not selected_cases_df.empty:
             with st.expander(f"📋 Currently Selected Cases ({len(selected_cases_df)})"):
+                # Prepare display dataframe with Bradley-Terry information
+                display_df = selected_cases_df.copy()
+                
+                # Create display columns
+                display_columns = ['case_name', 'citation', 'decision_year', 'area_of_law']
+                
+                # Add Bradley-Terry columns if they exist
+                if 'case_role' in display_df.columns:
+                    display_columns.extend(['case_role', 'block_number'])
+                    
+                    # Format case role for better display
+                    display_df['case_role'] = display_df['case_role'].fillna('Not Assigned')
+                    display_df['block_number'] = display_df['block_number'].fillna('N/A')
+                
+                if 'importance_score' in display_df.columns:
+                    display_columns.append('importance_score')
+                    # Format importance score
+                    display_df['importance_score'] = display_df['importance_score'].fillna(0.0).round(4)
+                
+                # Add detailed score breakdowns if available
+                score_columns = ['citation_score', 'length_score']
+                available_score_columns = [col for col in score_columns if col in display_df.columns]
+                if available_score_columns:
+                    display_columns.extend(available_score_columns)
+                    # Format score columns
+                    for col in available_score_columns:
+                        display_df[col] = display_df[col].fillna(0.0).round(4)
+                
+                display_columns.append('selected_date')
+                
+                # Display table with column configuration
                 st.dataframe(
-                    selected_cases_df[['case_name', 'citation', 'decision_year', 'area_of_law', 'selected_date']],
-                    use_container_width=True
+                    display_df[display_columns],
+                    use_container_width=True,
+                    column_config={
+                        'case_name': st.column_config.TextColumn('Case Name', width="medium"),
+                        'citation': st.column_config.TextColumn('Citation', width="medium"),
+                        'decision_year': st.column_config.NumberColumn('Year', width="small"),
+                        'area_of_law': st.column_config.TextColumn('Area of Law', width="medium"),
+                        'case_role': st.column_config.TextColumn('Role', width="small", help="Core cases are unique to each block, Bridge cases are shared across blocks"),
+                        'block_number': st.column_config.NumberColumn('Block', width="small", help="Block number in Bradley-Terry structure"),
+                        'importance_score': st.column_config.NumberColumn('Overall Score', width="small", help="Combined importance score (0-1): 80% citation + 20% length", format="%.4f"),
+                        'citation_score': st.column_config.NumberColumn('Citation Score', width="small", help="Score based on how often this case is cited by other cases (0-1)", format="%.4f"),
+                        'length_score': st.column_config.NumberColumn('Length Score', width="small", help="Score based on case comprehensiveness (0-1)", format="%.4f"),
+                        'selected_date': st.column_config.DatetimeColumn('Selected Date', width="medium")
+                    }
                 )
         
         # Add new cases interface
