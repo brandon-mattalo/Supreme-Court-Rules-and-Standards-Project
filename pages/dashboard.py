@@ -79,8 +79,107 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
             'test_a_novelty', 'test_b_novelty'
         ])
         
-        # Calculate Bradley-Terry statistics
-        bradley_terry_stats = calculate_bradley_terry_statistics(comparison_df)
+        # DEBUG: Compare with raw database query
+        print(f"🔍 ANALYSIS DEBUG: Complex JOIN query returned {len(comparison_df)} comparisons")
+        
+        # Get simple comparison count for comparison
+        simple_data = execute_sql("""
+            SELECT COUNT(*) FROM v2_experiment_comparisons WHERE experiment_id = ?
+        """, (experiment_id,), fetch=True)
+        simple_count = simple_data[0][0] if simple_data else 0
+        print(f"🔍 ANALYSIS DEBUG: Simple count query shows {simple_count} comparisons")
+        
+        if len(comparison_df) != simple_count:
+            print(f"🔍 ANALYSIS DEBUG: ⚠️ MISMATCH - Complex JOIN excludes {simple_count - len(comparison_df)} comparisons!")
+            
+            # Check for comparisons that are excluded by the JOINs
+            excluded_data = execute_sql("""
+                SELECT ec.extraction_id_1, ec.extraction_id_2, ec.winner_id, 
+                       ee1.extraction_id as ee1_exists, ee2.extraction_id as ee2_exists,
+                       c1.case_id as c1_exists, c2.case_id as c2_exists
+                FROM v2_experiment_comparisons ec
+                LEFT JOIN v2_experiment_extractions ee1 ON ec.extraction_id_1 = ee1.extraction_id
+                LEFT JOIN v2_experiment_extractions ee2 ON ec.extraction_id_2 = ee2.extraction_id
+                LEFT JOIN v2_cases c1 ON ee1.case_id = c1.case_id
+                LEFT JOIN v2_cases c2 ON ee2.case_id = c2.case_id
+                WHERE ec.experiment_id = ? 
+                AND (ee1.extraction_id IS NULL OR ee2.extraction_id IS NULL OR c1.case_id IS NULL OR c2.case_id IS NULL)
+                LIMIT 5
+            """, (experiment_id,), fetch=True)
+            
+            if excluded_data:
+                print(f"🔍 ANALYSIS DEBUG: Sample excluded comparisons:")
+                for row in excluded_data:
+                    print(f"  - ext1: {row[0]}, ext2: {row[1]}, winner: {row[2]}, missing_joins: ee1={row[3] is None}, ee2={row[4] is None}, c1={row[5] is None}, c2={row[6] is None}")
+        
+        # Calculate Bradley-Terry statistics using choix
+        from utils.choix_analysis import calculate_choix_bradley_terry_statistics
+        bradley_terry_stats = calculate_choix_bradley_terry_statistics(comparison_df)
+        
+        # DEBUG: Cross-check connectivity with simple debug method
+        print(f"🔍 CONNECTIVITY RECONCILIATION:")
+        
+        # Simple connectivity check using same algorithm as debug script
+        all_extractions_simple = list(set(comparison_df['extraction_id_1'].tolist() + comparison_df['extraction_id_2'].tolist()))
+        n_items_simple = len(all_extractions_simple)
+        id_to_idx_simple = {ext_id: idx for idx, ext_id in enumerate(all_extractions_simple)}
+        
+        # Build comparison list for simple check
+        simple_comparisons = []
+        for _, row in comparison_df.iterrows():
+            id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+            if winner_id == id_1 and id_1 in id_to_idx_simple and id_2 in id_to_idx_simple:
+                simple_comparisons.append((id_to_idx_simple[id_1], id_to_idx_simple[id_2]))
+            elif winner_id == id_2 and id_1 in id_to_idx_simple and id_2 in id_to_idx_simple:
+                simple_comparisons.append((id_to_idx_simple[id_2], id_to_idx_simple[id_1]))
+        
+        # Simple connectivity check
+        adjacency = {i: set() for i in range(n_items_simple)}
+        for winner, loser in simple_comparisons:
+            adjacency[winner].add(loser)
+            adjacency[loser].add(winner)
+        
+        visited = set()
+        components = []
+        def dfs(node, component):
+            if node in visited:
+                return
+            visited.add(node)
+            component.append(node)
+            for neighbor in adjacency[node]:
+                dfs(neighbor, component)
+        
+        for i in range(n_items_simple):
+            if i not in visited:
+                component = []
+                dfs(i, component)
+                if component:
+                    components.append(component)
+        
+        if len(visited) < n_items_simple:
+            for i in range(n_items_simple):
+                if i not in visited:
+                    components.append([i])
+        
+        simple_connected = len(components) == 1 and len(components[0]) == n_items_simple
+        
+        print(f"  - Simple method: {simple_connected} ({len(components)} components)")
+        print(f"  - Choix method: {not ('warning' in bradley_terry_stats)}")
+        print(f"  - Simple comparisons: {len(simple_comparisons)}")
+        print(f"  - Simple items: {n_items_simple}")
+        
+        if simple_connected != (not ('warning' in bradley_terry_stats)):
+            print(f"  ⚠️ CONNECTIVITY MISMATCH DETECTED!")
+            print(f"     This suggests data processing differences between methods")
+        
+        # Show connectivity warning banner if using fallback analysis
+        if 'warning' in bradley_terry_stats:
+            st.error(
+                "⚠️ **Graph Connectivity Warning**: The comparison graph is not yet connected. "
+                "Some cases cannot be compared to others through any path of comparisons. "
+                "**Continue making comparisons to connect all cases for more reliable rankings.** "
+                f"Currently using fallback analysis: {bradley_terry_stats['warning']}"
+            )
         
         # Show analysis in organized tabs
         analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4 = st.tabs([
@@ -103,576 +202,15 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
         st.error(f"Error in Bradley-Terry analysis: {str(e)}")
         st.write("Debug info:", str(e))
 
+# Legacy custom Bradley-Terry functions removed - now using choix exclusively
+
 def calculate_bradley_terry_statistics(comparison_df):
-    """Calculate comprehensive Bradley-Terry statistics"""
-    pd = _get_pandas()
-    np = _get_numpy()
-    
-    # Get all unique extractions (cases)
-    all_extractions = set(comparison_df['extraction_id_1'].tolist() + comparison_df['extraction_id_2'].tolist())
-    
-    # Initialize win-loss matrix
-    wins = {ext_id: 0 for ext_id in all_extractions}
-    losses = {ext_id: 0 for ext_id in all_extractions}
-    total_comparisons = {ext_id: 0 for ext_id in all_extractions}
-    
-    # Count wins and losses
-    for _, row in comparison_df.iterrows():
-        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
-        
-        total_comparisons[id_1] += 1
-        total_comparisons[id_2] += 1
-        
-        if winner_id == id_1:
-            wins[id_1] += 1
-            losses[id_2] += 1
-        elif winner_id == id_2:
-            wins[id_2] += 1
-            losses[id_1] += 1
-        # If no winner, neither gets a win
-    
-    # Calculate Bradley-Terry scores using iterative method
-    scores, comparisons = calculate_bradley_terry_scores(comparison_df, all_extractions)
-    
-    # Calculate win percentages
-    win_percentages = {ext_id: wins[ext_id] / total_comparisons[ext_id] if total_comparisons[ext_id] > 0 else 0 
-                      for ext_id in all_extractions}
-    
-    # Calculate reliability metrics
-    reliability_metrics = calculate_reliability_metrics(comparison_df)
-    
-    # Calculate Fisher Information Matrix and confidence intervals
-    try:
-        fisher_matrix = calculate_fisher_information_matrix(scores, comparisons, list(all_extractions))
-        ci_results = calculate_confidence_intervals(scores, fisher_matrix, list(all_extractions))
-        
-        # Calculate pairwise significance tests
-        significance_results = calculate_pairwise_significance(
-            scores, ci_results.get('covariance_matrix'), list(all_extractions)
-        )
-        
-        # Calculate item separation reliability
-        separation_reliability = calculate_item_separation_reliability(
-            scores, ci_results.get('standard_errors', {})
-        )
-        
-        # Calculate overdispersion and model diagnostics
-        model_diagnostics = calculate_overdispersion_tests(comparison_df, scores, comparisons)
-        
-    except Exception as e:
-        ci_results = {
-            'standard_errors': {ext_id: 0 for ext_id in all_extractions},
-            'confidence_intervals': {ext_id: {'lower': scores[ext_id], 'upper': scores[ext_id], 'margin_error': 0} for ext_id in all_extractions},
-            'covariance_matrix': None,
-            'confidence_level': 0.95,
-            'error': str(e)
-        }
-        significance_results = {
-            'significance_matrix': {},
-            'z_statistics': {},
-            'p_values': {},
-            'significant_pairs': [],
-            'warning': f'Error calculating significance: {str(e)}'
-        }
-        separation_reliability = {
-            'separation_coefficient': 0,
-            'reliability': 0,
-            'estimated_strata': 1,
-            'interpretation': 'Poor separation',
-            'error': str(e)
-        }
-        model_diagnostics = {
-            'deviance': 0,
-            'pearson_chi2': 0,
-            'overdispersion_ratio': 1,
-            'degrees_freedom': 0,
-            'interpretation': 'Cannot calculate',
-            'error': str(e)
-        }
-        fisher_matrix = None
-    
-    return {
-        'extraction_ids': list(all_extractions),
-        'wins': wins,
-        'losses': losses,
-        'total_comparisons': total_comparisons,
-        'win_percentages': win_percentages,
-        'bradley_terry_scores': scores,
-        'reliability_metrics': reliability_metrics,
-        'confidence_intervals': ci_results,
-        'significance_tests': significance_results,
-        'separation_reliability': separation_reliability,
-        'model_diagnostics': model_diagnostics,
-        'fisher_matrix': fisher_matrix
-    }
+    """Calculate comprehensive Bradley-Terry statistics using choix library"""
+    # This function is now a simple wrapper around choix_analysis
+    from utils.choix_analysis import calculate_choix_bradley_terry_statistics
+    return calculate_choix_bradley_terry_statistics(comparison_df)
 
-def calculate_bradley_terry_scores(comparison_df, all_extractions, max_iterations=1000, tolerance=1e-6):
-    """Calculate Bradley-Terry scores using iterative method with enhanced statistical output"""
-    pd = _get_pandas()
-    np = _get_numpy()
-    
-    # Initialize scores (start with equal probabilities)
-    scores = {ext_id: 1.0 for ext_id in all_extractions}
-    
-    # Create comparison matrix
-    comparisons = {}
-    for _, row in comparison_df.iterrows():
-        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
-        
-        key = tuple(sorted([id_1, id_2]))
-        if key not in comparisons:
-            comparisons[key] = {'total': 0, 'wins': {id_1: 0, id_2: 0}}
-        
-        comparisons[key]['total'] += 1
-        if winner_id == id_1:
-            comparisons[key]['wins'][id_1] += 1
-        elif winner_id == id_2:
-            comparisons[key]['wins'][id_2] += 1
-    
-    # Iterative estimation
-    for iteration in range(max_iterations):
-        old_scores = scores.copy()
-        
-        # Update each score
-        for ext_id in all_extractions:
-            numerator = 0
-            denominator = 0
-            
-            for (id_1, id_2), comp_data in comparisons.items():
-                if ext_id in [id_1, id_2]:
-                    other_id = id_2 if ext_id == id_1 else id_1
-                    
-                    wins_against_other = comp_data['wins'][ext_id]
-                    total_against_other = comp_data['total']
-                    
-                    numerator += wins_against_other
-                    denominator += total_against_other / (scores[ext_id] + scores[other_id])
-            
-            if denominator > 0:
-                scores[ext_id] = numerator / denominator
-        
-        # Check for convergence
-        max_change = max(abs(scores[ext_id] - old_scores[ext_id]) for ext_id in all_extractions)
-        if max_change < tolerance:
-            break
-    
-    # Normalize scores so they sum to number of items
-    total_score = sum(scores.values())
-    if total_score > 0:
-        n_items = len(all_extractions)
-        scores = {ext_id: score * n_items / total_score for ext_id, score in scores.items()}
-    
-    return scores, comparisons
-
-def calculate_fisher_information_matrix(scores, comparisons, all_extractions):
-    """Calculate Fisher Information Matrix for Bradley-Terry model"""
-    np = _get_numpy()
-    
-    n_items = len(all_extractions)
-    ext_to_idx = {ext_id: i for i, ext_id in enumerate(all_extractions)}
-    
-    # Initialize Fisher Information Matrix
-    fisher_matrix = np.zeros((n_items, n_items))
-    
-    # Calculate second derivatives of log-likelihood
-    for (id_1, id_2), comp_data in comparisons.items():
-        if id_1 in scores and id_2 in scores:
-            i = ext_to_idx[id_1]
-            j = ext_to_idx[id_2]
-            
-            pi = scores[id_1]
-            pj = scores[id_2]
-            nij = comp_data['total']
-            
-            # Second derivative elements for Bradley-Terry log-likelihood
-            # For pairs (i,j): d²L/dβi² = -nij * pi * pj / (pi + pj)²
-            denominator = (pi + pj) ** 2
-            if denominator > 0:
-                fisher_val = nij * pi * pj / denominator
-                
-                # Diagonal elements (negative second derivatives)
-                fisher_matrix[i, i] += fisher_val
-                fisher_matrix[j, j] += fisher_val
-                
-                # Off-diagonal elements
-                fisher_matrix[i, j] -= fisher_val
-                fisher_matrix[j, i] -= fisher_val
-    
-    return fisher_matrix
-
-def calculate_confidence_intervals(scores, fisher_matrix, all_extractions, confidence_level=0.95):
-    """Calculate confidence intervals for Bradley-Terry scores"""
-    np = _get_numpy()
-    from scipy import stats
-    
-    try:
-        # Calculate covariance matrix (inverse of Fisher Information Matrix)
-        covariance_matrix = np.linalg.inv(fisher_matrix)
-        
-        # Extract standard errors (sqrt of diagonal elements)
-        standard_errors = {}
-        confidence_intervals = {}
-        
-        # Get critical value for confidence level
-        alpha = 1 - confidence_level
-        z_critical = stats.norm.ppf(1 - alpha/2)
-        
-        for i, ext_id in enumerate(all_extractions):
-            if i < len(covariance_matrix):
-                # Standard error
-                variance = covariance_matrix[i, i]
-                if variance > 0:
-                    se = np.sqrt(variance)
-                    standard_errors[ext_id] = se
-                    
-                    # Confidence interval
-                    score = scores[ext_id]
-                    margin_error = z_critical * se
-                    confidence_intervals[ext_id] = {
-                        'lower': score - margin_error,
-                        'upper': score + margin_error,
-                        'margin_error': margin_error
-                    }
-                else:
-                    standard_errors[ext_id] = 0
-                    confidence_intervals[ext_id] = {
-                        'lower': scores[ext_id],
-                        'upper': scores[ext_id], 
-                        'margin_error': 0
-                    }
-        
-        return {
-            'standard_errors': standard_errors,
-            'confidence_intervals': confidence_intervals,
-            'covariance_matrix': covariance_matrix,
-            'confidence_level': confidence_level
-        }
-        
-    except np.linalg.LinAlgError:
-        # Fallback if matrix is singular
-        standard_errors = {ext_id: 0 for ext_id in all_extractions}
-        confidence_intervals = {ext_id: {
-            'lower': scores[ext_id], 'upper': scores[ext_id], 'margin_error': 0
-        } for ext_id in all_extractions}
-        
-        return {
-            'standard_errors': standard_errors,
-            'confidence_intervals': confidence_intervals,
-            'covariance_matrix': None,
-            'confidence_level': confidence_level,
-            'warning': 'Singular matrix - unable to calculate reliable confidence intervals'
-        }
-
-def calculate_pairwise_significance(scores, covariance_matrix, all_extractions, alpha=0.05):
-    """Calculate statistical significance of pairwise differences using Wald tests"""
-    np = _get_numpy()
-    from scipy import stats
-    
-    if covariance_matrix is None:
-        return {
-            'significance_matrix': {},
-            'z_statistics': {},
-            'p_values': {},
-            'significant_pairs': [],
-            'warning': 'No covariance matrix available - cannot calculate significance'
-        }
-    
-    ext_to_idx = {ext_id: i for i, ext_id in enumerate(all_extractions)}
-    n_items = len(all_extractions)
-    
-    # Initialize result dictionaries
-    significance_matrix = {}
-    z_statistics = {}
-    p_values = {}
-    significant_pairs = []
-    
-    # Calculate pairwise differences and their significance
-    for i, ext_id_1 in enumerate(all_extractions):
-        significance_matrix[ext_id_1] = {}
-        z_statistics[ext_id_1] = {}
-        p_values[ext_id_1] = {}
-        
-        for j, ext_id_2 in enumerate(all_extractions):
-            if i != j:
-                # Difference in scores
-                score_diff = scores[ext_id_1] - scores[ext_id_2]
-                
-                # Standard error of the difference: SE(diff) = sqrt(Var(i) + Var(j) - 2*Cov(i,j))
-                var_i = covariance_matrix[i, i] if i < covariance_matrix.shape[0] else 0
-                var_j = covariance_matrix[j, j] if j < covariance_matrix.shape[1] else 0
-                cov_ij = covariance_matrix[i, j] if i < covariance_matrix.shape[0] and j < covariance_matrix.shape[1] else 0
-                
-                se_diff = np.sqrt(var_i + var_j - 2 * cov_ij)
-                
-                if se_diff > 0:
-                    # Z-statistic for Wald test
-                    z_stat = score_diff / se_diff
-                    
-                    # P-value (two-tailed test)
-                    p_value = 2 * (1 - stats.norm.cdf(abs(z_stat)))
-                    
-                    # Store results
-                    z_statistics[ext_id_1][ext_id_2] = z_stat
-                    p_values[ext_id_1][ext_id_2] = p_value
-                    significance_matrix[ext_id_1][ext_id_2] = p_value < alpha
-                    
-                    # Track significant pairs
-                    if p_value < alpha and score_diff > 0:  # Only count when first item significantly better
-                        significant_pairs.append({
-                            'item_1': ext_id_1,
-                            'item_2': ext_id_2,
-                            'score_diff': score_diff,
-                            'z_statistic': z_stat,
-                            'p_value': p_value
-                        })
-                else:
-                    z_statistics[ext_id_1][ext_id_2] = 0
-                    p_values[ext_id_1][ext_id_2] = 1.0
-                    significance_matrix[ext_id_1][ext_id_2] = False
-            else:
-                # Same item comparison
-                z_statistics[ext_id_1][ext_id_2] = 0
-                p_values[ext_id_1][ext_id_2] = 1.0
-                significance_matrix[ext_id_1][ext_id_2] = False
-    
-    # Apply Bonferroni correction for multiple comparisons
-    n_comparisons = n_items * (n_items - 1)  # Total pairwise comparisons
-    bonferroni_alpha = alpha / n_comparisons if n_comparisons > 0 else alpha
-    
-    bonferroni_significant = []
-    for pair in significant_pairs:
-        if pair['p_value'] < bonferroni_alpha:
-            bonferroni_significant.append(pair)
-    
-    return {
-        'significance_matrix': significance_matrix,
-        'z_statistics': z_statistics,
-        'p_values': p_values,
-        'significant_pairs': significant_pairs,
-        'bonferroni_significant': bonferroni_significant,
-        'alpha': alpha,
-        'bonferroni_alpha': bonferroni_alpha,
-        'n_comparisons': n_comparisons
-    }
-
-def calculate_item_separation_reliability(scores, standard_errors):
-    """Calculate item separation reliability index"""
-    np = _get_numpy()
-    
-    if not scores or not standard_errors:
-        return {
-            'separation_coefficient': 0,
-            'reliability': 0,
-            'estimated_strata': 1,
-            'interpretation': 'Poor separation',
-            'warning': 'Insufficient data for calculation'
-        }
-    
-    # Calculate true score variance (variance of Bradley-Terry scores)
-    score_values = list(scores.values())
-    true_variance = np.var(score_values, ddof=1) if len(score_values) > 1 else 0
-    
-    # Calculate error variance (mean of squared standard errors)
-    se_values = [se for se in standard_errors.values() if se > 0]
-    error_variance = np.mean([se**2 for se in se_values]) if se_values else 0
-    
-    if error_variance <= 0 or true_variance <= 0:
-        return {
-            'separation_coefficient': 0,
-            'reliability': 0,
-            'estimated_strata': 1,
-            'interpretation': 'Poor separation',
-            'warning': 'Unable to calculate - insufficient variance'
-        }
-    
-    # Calculate separation coefficient: ratio of true SD to error SD
-    true_sd = np.sqrt(true_variance)
-    error_sd = np.sqrt(error_variance)
-    separation_coefficient = true_sd / error_sd
-    
-    # Calculate reliability: Separation² / (1 + Separation²)
-    reliability = (separation_coefficient ** 2) / (1 + separation_coefficient ** 2)
-    
-    # Estimate number of statistically distinguishable strata
-    # Rule of thumb: (4 * Separation + 1) / 3
-    estimated_strata = max(1, int((4 * separation_coefficient + 1) / 3))
-    
-    # Interpretation
-    if reliability > 0.9:
-        interpretation = 'Excellent separation'
-    elif reliability > 0.8:
-        interpretation = 'Good separation'
-    elif reliability > 0.7:
-        interpretation = 'Acceptable separation'
-    else:
-        interpretation = 'Poor separation'
-    
-    return {
-        'separation_coefficient': separation_coefficient,
-        'reliability': reliability,
-        'estimated_strata': estimated_strata,
-        'interpretation': interpretation,
-        'true_variance': true_variance,
-        'error_variance': error_variance,
-        'n_items': len(scores)
-    }
-
-def calculate_overdispersion_tests(comparison_df, scores, comparisons):
-    """Calculate overdispersion and model diagnostic tests"""
-    np = _get_numpy()
-    from scipy import stats
-    
-    if not scores or not comparisons:
-        return {
-            'deviance': 0,
-            'pearson_chi2': 0,
-            'overdispersion_ratio': 1,
-            'degrees_freedom': 0,
-            'deviance_p_value': 1,
-            'pearson_p_value': 1,
-            'interpretation': 'Cannot calculate - insufficient data'
-        }
-    
-    # Calculate residuals and fit statistics
-    total_deviance = 0
-    total_pearson_chi2 = 0
-    n_comparisons = 0
-    
-    for (id_1, id_2), comp_data in comparisons.items():
-        if id_1 in scores and id_2 in scores:
-            pi = scores[id_1]
-            pj = scores[id_2]
-            
-            # Expected probability that i beats j
-            expected_prob = pi / (pi + pj)
-            
-            # Observed data
-            wins_i = comp_data['wins'][id_1]
-            total_games = comp_data['total']
-            observed_prob = wins_i / total_games if total_games > 0 else 0
-            
-            # Deviance contribution
-            if observed_prob > 0 and observed_prob < 1:
-                deviance_contrib = 2 * total_games * (
-                    observed_prob * np.log(observed_prob / expected_prob) +
-                    (1 - observed_prob) * np.log((1 - observed_prob) / (1 - expected_prob))
-                )
-                total_deviance += deviance_contrib
-            
-            # Pearson chi-square contribution
-            expected_wins = expected_prob * total_games
-            if expected_wins > 0 and expected_wins < total_games:
-                pearson_contrib = ((wins_i - expected_wins) ** 2) / (expected_wins * (1 - expected_prob))
-                total_pearson_chi2 += pearson_contrib
-            
-            n_comparisons += 1
-    
-    # Degrees of freedom = number of comparisons - number of parameters
-    # For Bradley-Terry: n_items - 1 parameters (one is fixed as reference)
-    n_parameters = len(scores) - 1
-    degrees_freedom = max(1, n_comparisons - n_parameters)
-    
-    # Overdispersion ratio (should be approximately 1 if model fits well)
-    overdispersion_ratio = total_deviance / degrees_freedom if degrees_freedom > 0 else 1
-    
-    # P-values for goodness-of-fit tests
-    deviance_p_value = 1 - stats.chi2.cdf(total_deviance, degrees_freedom) if degrees_freedom > 0 else 1
-    pearson_p_value = 1 - stats.chi2.cdf(total_pearson_chi2, degrees_freedom) if degrees_freedom > 0 else 1
-    
-    # Interpretation
-    if overdispersion_ratio > 2:
-        interpretation = 'Significant overdispersion detected'
-    elif overdispersion_ratio > 1.5:
-        interpretation = 'Moderate overdispersion'
-    elif overdispersion_ratio < 0.5:
-        interpretation = 'Possible underdispersion'
-    else:
-        interpretation = 'Dispersion within expected range'
-    
-    return {
-        'deviance': total_deviance,
-        'pearson_chi2': total_pearson_chi2,
-        'overdispersion_ratio': overdispersion_ratio,
-        'degrees_freedom': degrees_freedom,
-        'deviance_p_value': deviance_p_value,
-        'pearson_p_value': pearson_p_value,
-        'n_comparisons': n_comparisons,
-        'n_parameters': n_parameters,
-        'interpretation': interpretation
-    }
-
-def calculate_reliability_metrics(comparison_df):
-    """Calculate reliability and consistency metrics"""
-    pd = _get_pandas()
-    np = _get_numpy()
-    
-    # Create a copy to avoid modifying the original
-    comparison_df = comparison_df.copy()
-    
-    total_comparisons = len(comparison_df)
-    decisive_comparisons = len(comparison_df[comparison_df['winner_id'].notna()])
-    
-    # Calculate validation rate
-    validation_rate = len(comparison_df[comparison_df['winner_id'].notna()]) / len(comparison_df) if len(comparison_df) > 0 else 0
-    
-    # Calculate transitivity violations (A beats B, B beats C, C beats A)
-    transitivity_score = calculate_transitivity_score(comparison_df)
-    
-    return {
-        'total_comparisons': total_comparisons,
-        'decisive_comparisons': decisive_comparisons,
-        'decisiveness_rate': decisive_comparisons / total_comparisons if total_comparisons > 0 else 0,
-        'average_confidence': validation_rate,
-        'transitivity_score': transitivity_score
-    }
-
-def calculate_transitivity_score(comparison_df):
-    """Calculate transitivity score (higher = more consistent)"""
-    # Build win relationships
-    wins = {}  # wins[A][B] = True if A beats B
-    
-    for _, row in comparison_df.iterrows():
-        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
-        
-        if winner_id == id_1:
-            if id_1 not in wins:
-                wins[id_1] = {}
-            wins[id_1][id_2] = True
-        elif winner_id == id_2:
-            if id_2 not in wins:
-                wins[id_2] = {}
-            wins[id_2][id_1] = True
-    
-    # Get all extractions
-    all_extractions = set(comparison_df['extraction_id_1'].tolist() + comparison_df['extraction_id_2'].tolist())
-    
-    # Check transitivity violations
-    total_triplets = 0
-    violations = 0
-    
-    for a in all_extractions:
-        for b in all_extractions:
-            for c in all_extractions:
-                if a != b and b != c and a != c:
-                    # Check if we have A > B and B > C
-                    a_beats_b = a in wins and b in wins[a]
-                    b_beats_c = b in wins and c in wins[b]
-                    
-                    if a_beats_b and b_beats_c:
-                        total_triplets += 1
-                        # Check if A > C (should be true for transitivity)
-                        a_beats_c = a in wins and c in wins[a]
-                        c_beats_a = c in wins and a in wins[c]
-                        
-                        # Violation if C beats A instead of A beating C
-                        if c_beats_a and not a_beats_c:
-                            violations += 1
-    
-    # Calculate score (0 to 1, where 1 = perfect transitivity)
-    if total_triplets == 0:
-        return 1.0  # No triplets to check = perfect by default
-    
-    return 1.0 - (violations / total_triplets)
+# All custom Bradley-Terry helper functions removed - using choix library exclusively
 
 def show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_tests, total_comparisons):
     """Show overview statistics"""
@@ -689,16 +227,26 @@ def show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_
     
     with col2:
         st.metric("Total Comparisons", total_comparisons)
-        decisive_rate = bradley_terry_stats['reliability_metrics']['decisiveness_rate']
-        st.metric("Decisive Comparisons", f"{decisive_rate:.1%}")
+        # Use native choix metrics
+        n_comparisons = bradley_terry_stats.get('n_comparisons', total_comparisons)
+        st.metric("Processed Comparisons", n_comparisons)
     
     with col3:
-        validation_rate = bradley_terry_stats['reliability_metrics']['average_confidence']
-        st.metric("Validation Rate", f"{validation_rate:.1%}" if validation_rate > 0 else "N/A")
+        # Show connectivity status from choix analysis
+        if 'warning' in bradley_terry_stats:
+            st.metric("Analysis Status", "Disconnected Graph", delta="⚠️")
+        else:
+            convergence_info = bradley_terry_stats.get('convergence_info', {})
+            if convergence_info.get('converged', False):
+                st.metric("Analysis Status", "Converged", delta="✅")
+            else:
+                st.metric("Analysis Status", "Processing", delta="🔄")
     
     with col4:
-        transitivity = bradley_terry_stats['reliability_metrics']['transitivity_score']
-        st.metric("Transitivity Score", f"{transitivity:.2f}")
+        # Show score variance as measure of discrimination
+        reliability = bradley_terry_stats.get('reliability_metrics', {})
+        score_variance = reliability.get('score_variance', 0)
+        st.metric("Score Variance", f"{score_variance:.3f}")
     
     # Distribution of test novelty
     st.subheader("📈 Test Novelty Distribution")
@@ -717,10 +265,19 @@ def show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_
         st.info("No test novelty data available")
 
 def show_bradley_terry_rankings(comparison_df, bradley_terry_stats):
-    """Show Bradley-Terry rankings and scores"""
+    """Show Bradley-Terry rankings and scores using choix results"""
     pd = _get_pandas()
     
-    st.subheader("🏆 Bradley-Terry Rankings")
+    st.subheader("🏆 Bradley-Terry Rankings (choix)")
+    
+    # Check for errors in choix analysis
+    if 'error' in bradley_terry_stats:
+        st.error(f"❌ Bradley-Terry analysis failed: {bradley_terry_stats['error']}")
+        return
+    
+    if not bradley_terry_stats.get('bradley_terry_scores'):
+        st.warning("⚠️ No Bradley-Terry scores available")
+        return
     
     # Get case information for each extraction
     case_info = {}
@@ -736,30 +293,60 @@ def show_bradley_terry_rankings(comparison_df, bradley_terry_stats):
             'year': row['case_b_year']
         }
     
-    # Create ranking table
+    # Create ranking table from choix results
     ranking_data = []
     for ext_id in bradley_terry_stats['extraction_ids']:
         if ext_id in case_info:
+            # Get choix data
+            bt_score = bradley_terry_stats['bradley_terry_scores'].get(ext_id, 0)
+            rank = bradley_terry_stats['rankings'].get(ext_id, 0)
+            
+            # Get win statistics
+            win_stats = bradley_terry_stats.get('win_statistics', {})
+            wins = win_stats.get('wins', {}).get(ext_id, 0)
+            losses = win_stats.get('losses', {}).get(ext_id, 0)
+            total_comps = win_stats.get('total_comparisons', {}).get(ext_id, 0)
+            win_rate = win_stats.get('win_percentages', {}).get(ext_id, 0)
+            
+            # Get confidence interval data if available
+            ci_data = bradley_terry_stats.get('confidence_intervals', {}).get('confidence_intervals', {}).get(ext_id, {})
+            margin_error = ci_data.get('margin_error', 0)
+            
             ranking_data.append({
-                'Case': case_info[ext_id]['case_name'],
+                'Rank': rank,
+                'Case': case_info[ext_id]['case_name'][:50] + ("..." if len(case_info[ext_id]['case_name']) > 50 else ""),
                 'Citation': case_info[ext_id]['citation'],
                 'Year': case_info[ext_id]['year'],
-                'Bradley-Terry Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
-                'Win Rate': bradley_terry_stats['win_percentages'][ext_id],
-                'Wins': bradley_terry_stats['wins'][ext_id],
-                'Losses': bradley_terry_stats['losses'][ext_id],
-                'Total Comparisons': bradley_terry_stats['total_comparisons'][ext_id]
+                'BT Score': f"{bt_score:.3f}",
+                'CI (±)': f"{margin_error:.3f}" if margin_error > 0 else "N/A",
+                'Win Rate': f"{win_rate:.1%}",
+                'W-L-T': f"{wins}-{losses}-{total_comps - wins - losses}",
+                'Total': total_comps
             })
     
-    # Sort by Bradley-Terry score (descending)
+    # Sort by rank
     ranking_df = pd.DataFrame(ranking_data)
-    ranking_df = ranking_df.sort_values('Bradley-Terry Score', ascending=False)
-    ranking_df.index = range(1, len(ranking_df) + 1)
+    ranking_df = ranking_df.sort_values('Rank')
     
-    st.dataframe(ranking_df, use_container_width=True)
+    # Display the ranking table
+    st.dataframe(ranking_df, use_container_width=True, hide_index=True)
+    
+    # Analysis summary
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Cases", len(bradley_terry_stats['extraction_ids']))
+        
+    with col2:
+        st.metric("Total Comparisons", bradley_terry_stats.get('n_comparisons', 0))
+        
+    with col3:
+        convergence_info = bradley_terry_stats.get('convergence_info', {})
+        method = convergence_info.get('method', 'Unknown')
+        st.metric("Analysis Method", method)
     
     # Interpretation
-    st.info("📊 **Interpretation:** Higher Bradley-Terry scores indicate more 'rule-like' legal tests. Lower scores indicate more 'standard-like' tests.")
+    st.info("📊 **Interpretation:** Higher Bradley-Terry scores indicate more 'rule-like' legal tests. Lower scores indicate more 'standard-like' tests. Confidence intervals (CI) show the uncertainty in score estimates.")
 
 def show_temporal_analysis(comparison_df, bradley_terry_stats):
     """Show temporal analysis and regression"""
@@ -791,7 +378,7 @@ def show_temporal_analysis(comparison_df, bradley_terry_stats):
                 'Case': case_info[ext_id]['case_name'],
                 'Year': case_info[ext_id]['year'],
                 'Rule_Likeness_Score': bradley_terry_stats['bradley_terry_scores'][ext_id],
-                'Win_Rate': bradley_terry_stats['win_percentages'][ext_id]
+                'Win_Rate': bradley_terry_stats['win_statistics']['win_percentages'][ext_id]
             })
     
     if not case_data:
@@ -1043,25 +630,29 @@ def show_reliability_analysis(comparison_df, bradley_terry_stats):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Total Comparisons", reliability['total_comparisons'])
-        st.metric("Decisive Comparisons", reliability['decisive_comparisons'])
+        total_comps = bradley_terry_stats.get('n_comparisons', 0)
+        st.metric("Total Comparisons", total_comps)
+        st.metric("Items Analyzed", len(bradley_terry_stats.get('extraction_ids', [])))
     
     with col2:
-        decisiveness = reliability['decisiveness_rate']
-        st.metric("Decisiveness Rate", f"{decisiveness:.1%}")
+        # Show method used for analysis
+        method = bradley_terry_stats.get('convergence_info', {}).get('method', 'unknown')
+        st.metric("Analysis Method", method.replace('_', ' ').title())
         
-        if decisiveness > 0.9:
-            st.success("Excellent decisiveness")
-        elif decisiveness > 0.7:
-            st.info("Good decisiveness")
+        # Show convergence status
+        converged = bradley_terry_stats.get('convergence_info', {}).get('converged', False)
+        if converged:
+            st.success("Analysis converged")
         else:
-            st.warning("Low decisiveness")
+            st.info("Using fallback analysis")
     
     with col3:
-        if reliability['average_confidence'] > 0:
-            st.metric("Average Confidence", f"{reliability['average_confidence']:.2f}")
+        # Show score variance as quality metric
+        score_variance = reliability.get('score_variance', 0)
+        if score_variance > 0:
+            st.metric("Score Variance", f"{score_variance:.3f}")
         else:
-            st.metric("Average Confidence", "N/A")
+            st.metric("Score Variance", "N/A")
     
     # Detailed reliability assessment
     st.subheader("📊 Reliability Assessment")
@@ -1151,31 +742,39 @@ def show_comprehensive_reliability_analysis(comparison_df, bradley_terry_stats):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Total Comparisons", reliability['total_comparisons'])
+        total_comps = bradley_terry_stats.get('n_comparisons', 0)
+        st.metric("Total Comparisons", total_comps)
     
     with col2:
-        decisive_rate = reliability['decisiveness_rate']
-        st.metric("Decisive Rate", f"{decisive_rate:.1%}")
-        if decisive_rate > 0.9:
-            st.success("Excellent")
-        elif decisive_rate > 0.7:
-            st.info("Good")
+        # Show analysis method and quality
+        method = bradley_terry_stats.get('convergence_info', {}).get('method', 'unknown')
+        st.metric("Method", method.replace('_', ' ').title())
+        
+        converged = bradley_terry_stats.get('convergence_info', {}).get('converged', False)
+        if converged:
+            st.success("Converged")
         else:
-            st.warning("Needs improvement")
+            st.info("Fallback analysis")
     
     with col3:
-        transitivity = reliability['transitivity_score']
-        st.metric("Transitivity Score", f"{transitivity:.2f}")
-        if transitivity > 0.8:
-            st.success("High consistency")
-        elif transitivity > 0.6:
-            st.info("Moderate consistency")
+        # Show score range as discrimination metric
+        scores = bradley_terry_stats.get('bradley_terry_scores', {})
+        if scores:
+            score_range = max(scores.values()) - min(scores.values())
+            st.metric("Score Range", f"{score_range:.3f}")
+            if score_range > 2.0:
+                st.success("Good discrimination")
+            elif score_range > 1.0:
+                st.info("Moderate discrimination")
+            else:
+                st.warning("Low discrimination")
         else:
-            st.warning("Low consistency")
+            st.metric("Score Range", "N/A")
     
     with col4:
-        validation_rate = reliability.get('average_confidence', 0)
-        st.metric("Validation Rate", f"{validation_rate:.1%}")
+        # Show number of items analyzed
+        n_items = len(bradley_terry_stats.get('extraction_ids', []))
+        st.metric("Items Analyzed", n_items)
     
     # Create comprehensive sub-tabs for different types of analysis
     reliability_tab1, reliability_tab2, reliability_tab3, reliability_tab4, reliability_tab5 = st.tabs([
@@ -1203,84 +802,86 @@ def show_model_validation_analysis(comparison_df, bradley_terry_stats):
     np = _get_numpy()
     st.subheader("🔗 Model Validation & Graph Connectivity")
     
-    # Graph connectivity analysis
+    # Graph connectivity analysis using choix results
     st.write("**Graph Connectivity Analysis:**")
     
-    # Build adjacency matrix to check connectivity
+    # Use actual choix connectivity results instead of recalculating
     extraction_ids = bradley_terry_stats['extraction_ids']
-    n_items = len(extraction_ids)
+    col1, col2 = st.columns(2)
     
-    # Create adjacency matrix
-    adj_matrix = np.zeros((n_items, n_items))
-    id_to_idx = {ext_id: i for i, ext_id in enumerate(extraction_ids)}
+    with col1:
+        # Use actual choix connectivity results
+        if 'warning' in bradley_terry_stats:
+            # This means fallback was used due to disconnected graph
+            st.metric("Graph Connectivity", "❌ Disconnected")
+            st.error("Graph is disconnected - using fallback analysis")
+            
+            # Show connectivity warning details if available
+            reliability = bradley_terry_stats.get('reliability_metrics', {})
+            if 'connectivity_warning' in reliability:
+                st.warning(reliability['connectivity_warning'])
+        else:
+            # choix analysis succeeded - graph is connected
+            st.metric("Graph Connectivity", "✅ Connected")
+            st.success("All cases are connected through comparisons - rankings are valid")
     
-    for _, row in comparison_df.iterrows():
-        if row['extraction_id_1'] in id_to_idx and row['extraction_id_2'] in id_to_idx:
-            i = id_to_idx[row['extraction_id_1']]
-            j = id_to_idx[row['extraction_id_2']]
-            adj_matrix[i, j] = 1
-            adj_matrix[j, i] = 1
-    
-    # Check connectivity using simple BFS
-    def is_connected(matrix):
-        n = len(matrix)
-        if n == 0:
-            return True
+    with col2:
+        # Show number of comparisons as connectivity measure
+        n_comparisons = bradley_terry_stats.get('n_comparisons', 0)
+        n_items = len(extraction_ids)
         
-        visited = [False] * n
-        queue = [0]
-        visited[0] = True
-        visited_count = 1
-        
-        while queue:
-            current = queue.pop(0)
-            for neighbor in range(n):
-                if matrix[current][neighbor] > 0 and not visited[neighbor]:
-                    visited[neighbor] = True
-                    visited_count += 1
-                    queue.append(neighbor)
-        
-        return visited_count == n
+        if n_items > 1:
+            avg_connections = (2 * n_comparisons) / n_items  # Each comparison connects 2 items
+            st.metric("Avg Connections per Case", f"{avg_connections:.1f}")
+            
+            if avg_connections > 5:
+                st.success("Well-connected graph")
+            elif avg_connections > 3:
+                st.info("Moderately connected")
+            else:
+                st.warning("Sparsely connected")
+        else:
+            st.metric("Avg Connections per Case", "N/A")
     
-    is_graph_connected = is_connected(adj_matrix)
+    # Algorithm convergence information using choix results
+    st.write("**Algorithm Convergence:**")
+    
+    # Use choix convergence information
+    convergence_info = bradley_terry_stats.get('convergence_info', {})
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.metric("Graph Connectivity", "✅ Connected" if is_graph_connected else "❌ Disconnected")
-        if is_graph_connected:
-            st.success("All cases are connected through comparisons - rankings are valid")
+        # Show method used
+        method = convergence_info.get('method', 'unknown')
+        st.metric("Analysis Method", method.replace('_', ' ').title())
+        
+        # Show convergence status
+        converged = convergence_info.get('converged', False)
+        if converged:
+            st.success("✅ Algorithm converged successfully")
         else:
-            st.error("Graph is disconnected - some cases cannot be compared")
+            if 'warning' in bradley_terry_stats:
+                st.warning("⚠️ Using fallback analysis due to disconnected graph")
+            else:
+                st.info("⚠️ Analysis used fallback method")
     
     with col2:
-        # Calculate average connectivity
-        connections_per_case = adj_matrix.sum(axis=1)
-        avg_connections = connections_per_case.mean()
-        st.metric("Avg Connections per Case", f"{avg_connections:.1f}")
+        # Show reliability metrics from choix
+        reliability = bradley_terry_stats.get('reliability_metrics', {})
+        score_variance = reliability.get('score_variance', 0)
         
-        if avg_connections > 5:
-            st.success("Well-connected graph")
-        elif avg_connections > 3:
-            st.info("Moderately connected")
+        if score_variance > 0:
+            st.metric("Score Variance", f"{score_variance:.3f}")
+            if score_variance > 1.0:
+                st.success("✅ Good score discrimination")
+            elif score_variance > 0.5:
+                st.info("⚠️ Moderate score discrimination")
+            else:
+                st.warning("❌ Low score discrimination")
         else:
-            st.warning("Sparsely connected")
-    
-    # Algorithm convergence information
-    st.write("**Algorithm Convergence:**")
-    
-    # Check if we have convergence information
-    separation_data = bradley_terry_stats.get('separation_reliability', {})
-    if 'reliability' in separation_data:
-        reliability_coef = separation_data['reliability']
-        st.metric("Item Separation Reliability", f"{reliability_coef:.3f}")
-        
-        if reliability_coef > 0.8:
-            st.success("✅ Excellent separation - rankings are highly reliable")
-        elif reliability_coef > 0.6:
-            st.info("⚠️ Good separation - rankings are moderately reliable")
-        else:
-            st.warning("❌ Poor separation - rankings may be unreliable")
+            st.metric("Score Variance", "N/A")
+            st.info("Score variance not available")
     
     # Model diagnostics
     diagnostics = bradley_terry_stats.get('model_diagnostics', {})
@@ -2074,8 +1675,8 @@ def create_exportable_summary_table(bradley_terry_stats, comparison_df):
                 'Standard_Error': se,
                 'Lower_95_CI': ci_info.get('lower', 0),
                 'Upper_95_CI': ci_info.get('upper', 0),
-                'Win_Rate': bradley_terry_stats['win_percentages'][ext_id],
-                'Total_Comparisons': bradley_terry_stats['total_comparisons'][ext_id]
+                'Win_Rate': bradley_terry_stats['win_statistics']['win_percentages'][ext_id],
+                'Total_Comparisons': bradley_terry_stats['win_statistics']['total_comparisons'][ext_id]
             })
     
     summary_df = pd.DataFrame(summary_data)
@@ -2089,7 +1690,7 @@ def create_exportable_summary_table(bradley_terry_stats, comparison_df):
         'Model_Deviance': diag_data.get('deviance', 0),
         'Degrees_Freedom': diag_data.get('degrees_freedom', 0),
         'Total_Items': len(bradley_terry_stats['extraction_ids']),
-        'Total_Comparisons': bradley_terry_stats['reliability_metrics']['total_comparisons']
+        'Total_Comparisons': bradley_terry_stats.get('n_comparisons', 0)
     }
     
     return summary_df, model_stats
@@ -2415,6 +2016,8 @@ def run_comparisons_for_experiment(experiment_id):
         # Initialize ASAP active sampling with real-time progress
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
+        # Create a new placeholder for persistent status information
+        persistent_status_placeholder = st.empty()
         
         # Initialize ASAP sampler with current comparison state
         st.info("🔄 Loading ASAP state from database...")
@@ -2616,26 +2219,139 @@ def run_comparisons_for_experiment(experiment_id):
                 result = 1 if winner_id == ext_1[0] else 0
                 asap_sampler.add_comparison_result(idx_1, idx_2, result)
                 
-                # Check for convergence
+                # Check for convergence using both TrueSkill and Bradley-Terry
                 spearman_corr = asap_sampler.get_spearman_correlation()
+                bt_ranking_corr = asap_sampler.get_bradley_terry_ranking_correlation()
+                bt_converged = asap_sampler.get_bradley_terry_convergence()
                 coverage_stats = asap_sampler.get_coverage_stats()
                 
+                # Build convergence status string showing both methods
                 if spearman_corr is not None:
-                    convergence_status = "✅ CONVERGED" if spearman_corr > 0.99 else f"📊 {spearman_corr:.4f}"
-                    converged = spearman_corr > 0.99
+                    ts_status = "✅ TS" if spearman_corr > 0.99 else f"TS:{spearman_corr:.3f}"
                 else:
-                    # Show coverage progress instead of just "Initializing..."
+                    # Show coverage progress for TrueSkill
                     coverage_pct = coverage_stats.get('coverage_percent', 0)
                     compared = coverage_stats.get('compared', 0)
                     total = coverage_stats.get('total', 0)
-                    convergence_status = f"📊 Coverage: {compared}/{total} ({coverage_pct:.1f}%)"
-                    converged = False
+                    ts_status = f"Coverage: {compared}/{total} ({coverage_pct:.1f}%)"
                 
-                # Update single progress line with winner, correlation, and sampling method
-                method_icon = "🎲" if "Random" in sampling_method else "🎯"
-                method_short = "Random" if "Random" in sampling_method else "ASAP"
-                progress_placeholder.success(
-                    f"🏆 **Winner**: {winner_name} | {method_icon} **Method**: {method_short} | **Spearman**: {convergence_status} | **Cost**: ${total_cost:.2f} | **Iteration**: {iteration}"
+                # Bradley-Terry status with enhanced connectivity check
+                graph_connected = asap_sampler.is_graph_connected()
+                connectivity_info = asap_sampler.get_connectivity_info()
+                
+                if not graph_connected:
+                    # Show absorbing class information instead of generic "Disconnected"
+                    absorbing_info = connectivity_info.get('absorbing_classes', {})
+                    if absorbing_info.get('has_absorbing_classes'):
+                        n_absorbing = absorbing_info.get('n_absorbing_classes', 0)
+                        if n_absorbing > 0:
+                            # Check for progress in absorbing class resolution
+                            progress_info = ""
+                            if hasattr(asap_sampler, 'absorbing_classes_history') and len(asap_sampler.absorbing_classes_history) > 1:
+                                history = asap_sampler.absorbing_classes_history
+                                if len(history) >= 2:
+                                    previous_entry = history[-2]
+                                    # Handle both old format (int) and new format (dict)
+                                    previous_count = previous_entry.get('count', previous_entry) if isinstance(previous_entry, dict) else previous_entry
+                                    if n_absorbing < previous_count:
+                                        improvement = previous_count - n_absorbing
+                                        progress_info = f" (↓{improvement})"
+                            
+                            # Add sampling mode indicator for absorbing classes
+                            mode_indicator = ""
+                            if hasattr(asap_sampler, 'sampling_mode'):
+                                if asap_sampler.sampling_mode == 'absorbing_targeted':
+                                    mode_indicator = "🎯"  # Target icon for absorbing-targeted mode
+                                    
+                            bt_status = f"BT:{n_absorbing}AC{progress_info}{mode_indicator}"  # e.g., "BT:4AC (↓1)🎯" = 4 absorbing classes, targeted mode
+                            connectivity_warning = f" | ⚠️ {n_absorbing} absorbing classes{progress_info}"
+                        else:
+                            bt_status = "BT:Issue"
+                            connectivity_warning = " | ⚠️ Connectivity issue"
+                    else:
+                        basic_connected = connectivity_info.get('is_basic_connected', False)
+                        if not basic_connected:
+                            n_components = connectivity_info.get('n_components', 0)
+                            bt_status = f"BT:{n_components}DC"  # e.g., "BT:3DC" = 3 disconnected components
+                            connectivity_warning = f" | ⚠️ {n_components} disconnected components"
+                        else:
+                            bt_status = "BT:Disconnected"
+                            connectivity_warning = " | ⚠️ Graph disconnected"
+                elif bt_ranking_corr is not None:
+                    bt_status = "✅ BT" if bt_ranking_corr > 0.99 else f"BT:{bt_ranking_corr:.3f}"
+                    connectivity_warning = ""
+                elif bt_converged:
+                    bt_status = "✅ BT-Conv"
+                    connectivity_warning = ""
+                else:
+                    bt_status = "BT:--"
+                    connectivity_warning = ""
+                
+                # Get current comparison counts for display
+                total_comparisons = asap_sampler.get_total_comparisons()
+                bt_comparisons_count = len(asap_sampler.bt_comparisons) if asap_sampler.bt_comparisons else 0
+                
+                # Enhanced status showing both TrueSkill matrix total and BT comparisons
+                comparison_status = f"Comparisons: {bt_comparisons_count}/{total_comparisons}"
+                if bt_comparisons_count != total_comparisons:
+                    comparison_status += " (syncing)"
+                
+                # Combined status with connectivity warning and comparison counts
+                convergence_status = f"{ts_status} | {bt_status}{connectivity_warning} | {comparison_status}"
+                converged = (spearman_corr is not None and spearman_corr > 0.99) or bt_converged or (bt_ranking_corr is not None and bt_ranking_corr > 0.99)
+                
+                # Show winner in progress placeholder (temporary notification)
+                progress_placeholder.success(f"🏆 **Winner**: {winner_name}")
+                
+                # Update persistent status with detailed information
+                method_display = sampling_method
+                
+                # Check if absorbing-targeted mode is active and modify display
+                if hasattr(asap_sampler, 'sampling_mode') and asap_sampler.sampling_mode == 'absorbing_targeted':
+                    if method_display in ["ASAP Full", "ASAP Approx"]:
+                        method_display = f"{method_display} + AC Targeting"
+                    elif method_display == "Absorbing-Targeted":
+                        method_display = "AC Targeting"
+                
+                # Set icon and format method name based on the sampling methods
+                if method_display == "ASAP Full":
+                    method_icon = "🎯"
+                    method_display = "ASAP Full"
+                elif method_display == "ASAP Approx":
+                    method_icon = "🎯"
+                    method_display = "ASAP Approx"
+                elif method_display == "ASAP Full + AC Targeting":
+                    method_icon = "🎯"
+                    method_display = "ASAP Full + AC Targeting"
+                elif method_display == "ASAP Approx + AC Targeting":
+                    method_icon = "🎯"
+                    method_display = "ASAP Approx + AC Targeting"
+                elif method_display == "AC Targeting":
+                    method_icon = "🎯"
+                    method_display = "AC Targeting"
+                elif method_display == "Absorbing-Targeted":
+                    method_icon = "🎯"
+                    method_display = "Absorbing-Targeted"
+                elif method_display == "ASAP Random Fallback":
+                    method_icon = "⚠️"
+                    method_display = "ASAP Random Fallback"
+                elif method_display == "Random":
+                    method_icon = "🎲"
+                    method_display = "Random"
+                else:
+                    method_icon = "❓"
+                    method_display = method_display
+                
+                # Calculate cases completed out of total
+                completed_count = asap_sampler.get_total_comparisons()
+                total_pairs = (n_items * (n_items - 1)) // 2  # Total possible pairs
+                
+                persistent_status_placeholder.info(
+                    f"{method_icon} **Method**: {method_display} | "
+                    f"💰 **Cost**: ${total_cost:.2f} | "
+                    f"🔄 **Iteration**: {iteration} | "
+                    f"✅ **Comparisons**: {completed_count}/{total_pairs} complete | "
+                    f"**Convergence**: {convergence_status}"
                 )
                 
                 # Save ASAP state to database
@@ -3430,17 +3146,29 @@ def show_experiment_card(exp, total_cases_count, avg_all_case_length):
     # Calculate case count based on sample group or legacy system
     sample_group_id = exp_detail.get('sample_group_id')
     if sample_group_id:
-        # New system: Get case count from sample group
-        from utils.sample_group_management import get_sample_groups
-        sample_groups_df = get_sample_groups()
-        matching_group = sample_groups_df[sample_groups_df['group_id'] == sample_group_id]
-        
-        if not matching_group.empty:
-            n_cases = int(matching_group.iloc[0]['member_count'])
-            # Use average length from sample group if available, otherwise use global average
-            avg_case_length = avg_all_case_length  # Could enhance this with sample group specific average
-        else:
-            n_cases = 0
+        # New system: Get case count from sample group with error handling
+        try:
+            from utils.sample_group_management import get_sample_groups
+            sample_groups_df = get_sample_groups()
+            
+            if sample_groups_df is not None and not sample_groups_df.empty:
+                matching_group = sample_groups_df[sample_groups_df['group_id'] == sample_group_id]
+                
+                if not matching_group.empty:
+                    n_cases = int(matching_group.iloc[0]['member_count'])
+                    # Use average length from sample group if available, otherwise use global average
+                    avg_case_length = avg_all_case_length  # Could enhance this with sample group specific average
+                else:
+                    n_cases = 0
+                    avg_case_length = avg_all_case_length
+            else:
+                # Database error occurred, use fallback
+                st.warning("🔄 Sample group data temporarily unavailable. Using fallback calculation.")
+                n_cases = 50  # Reasonable fallback
+                avg_case_length = avg_all_case_length
+        except Exception as e:
+            st.warning("🔄 Database connection issue. Using fallback calculation.")
+            n_cases = 50  # Reasonable fallback
             avg_case_length = avg_all_case_length
     else:
         # No sample group: Cannot calculate estimates without sample group
@@ -3656,54 +3384,58 @@ def show_basic_info_form(exp, editing_id):
         # Sample Group Selection
         st.subheader("📋 Sample Group Selection")
         
-        # Get available sample groups
-        from utils.sample_group_management import get_sample_groups
-        sample_groups_df = get_sample_groups()
-        
-        if sample_groups_df.empty:
-            st.warning("⚠️ No sample groups available. Please create sample groups first using the Case Management page.")
-            st.info("💡 **Tip**: Use the Case Management page to create sample groups with your desired cases.")
-            sample_group_id = None
-        else:
-            # Create options for selectbox
-            group_options = ["None (No sample group selected)"] + [
-                f"{row['group_name']} ({row['member_count']} cases)" 
-                for _, row in sample_groups_df.iterrows()
-            ]
+        # Get available sample groups with error handling
+        try:
+            from utils.sample_group_management import get_sample_groups
+            sample_groups_df = get_sample_groups()
             
-            # Find current selection index
-            current_sample_group_id = exp.get('sample_group_id')
-            if current_sample_group_id:
-                # Find the row with matching group_id
-                matching_row = sample_groups_df[sample_groups_df['group_id'] == current_sample_group_id]
-                if not matching_row.empty:
-                    current_index = list(sample_groups_df.index).index(matching_row.index[0]) + 1
+            if sample_groups_df is None or sample_groups_df.empty:
+                st.warning("⚠️ No sample groups available. Please create sample groups first using the Case Management page.")
+                st.info("💡 **Tip**: Use the Case Management page to create sample groups with your desired cases.")
+                sample_group_id = None
+            else:
+                # Create options for selectbox
+                group_options = ["None (No sample group selected)"] + [
+                    f"{row['group_name']} ({row['member_count']} cases)" 
+                    for _, row in sample_groups_df.iterrows()
+                ]
+                
+                # Find current selection index
+                current_sample_group_id = exp.get('sample_group_id')
+                if current_sample_group_id:
+                    # Find the row with matching group_id
+                    matching_row = sample_groups_df[sample_groups_df['group_id'] == current_sample_group_id]
+                    if not matching_row.empty:
+                        current_index = list(sample_groups_df.index).index(matching_row.index[0]) + 1
+                    else:
+                        current_index = 0
                 else:
                     current_index = 0
-            else:
-                current_index = 0
-            
-            selected_group = st.selectbox(
-                "Sample Group",
-                options=group_options,
-                index=current_index,
-                help="Select a sample group to use for this experiment. The experiment will only process cases from this group."
-            )
-            
-            # Extract sample_group_id from selection
-            if selected_group == "None (No sample group selected)":
-                sample_group_id = None
-                st.info("💡 **No sample group selected**: This experiment will use the legacy case selection system.")
-            else:
-                # Find the corresponding group_id
-                selected_index = group_options.index(selected_group) - 1
-                sample_group_id = int(sample_groups_df.iloc[selected_index]['group_id'])
                 
-                # Show group details
-                selected_group_info = sample_groups_df.iloc[selected_index]
-                st.success(f"✅ **Selected**: {selected_group_info['group_name']} with {selected_group_info['member_count']} cases")
-                if selected_group_info['description']:
-                    st.caption(f"📝 **Description**: {selected_group_info['description']}")
+                selected_group = st.selectbox(
+                    "Sample Group",
+                    options=group_options,
+                    index=current_index,
+                    help="Select a sample group to use for this experiment. The experiment will only process cases from this group."
+                )
+                
+                # Extract sample_group_id from selection
+                if selected_group == "None (No sample group selected)":
+                    sample_group_id = None
+                    st.info("💡 **No sample group selected**: This experiment will use the legacy case selection system.")
+                else:
+                    # Find the corresponding group_id
+                    selected_index = group_options.index(selected_group) - 1
+                    sample_group_id = int(sample_groups_df.iloc[selected_index]['group_id'])
+                    
+                    # Show group details
+                    selected_group_info = sample_groups_df.iloc[selected_index]
+                    st.success(f"✅ **Selected**: {selected_group_info['group_name']} with {selected_group_info['member_count']} cases")
+                    if selected_group_info['description']:
+                        st.caption(f"📝 **Description**: {selected_group_info['description']}")
+        except Exception as e:
+            st.error("🔌 Database connection issue loading sample groups. Please refresh the page.")
+            sample_group_id = None
         
         # Extraction Strategy Selection
         st.subheader("📋 Extraction Strategy")
