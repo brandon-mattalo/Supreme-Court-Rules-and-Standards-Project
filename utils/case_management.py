@@ -9,57 +9,28 @@ from config import execute_sql
 
 def calculate_bradley_terry_comparisons(n_cases=None):
     """
-    Calculate required number of comparisons using Bradley-Terry linked block design.
-    Now uses actual block structure when available.
+    Calculate estimated number of comparisons using active sampling.
+    Uses O(n log n) estimation for ASAP active sampling method.
     
     Parameters:
-    - n_cases: Total number of cases (optional, will use actual structure if available)
+    - n_cases: Total number of cases
     
     Returns:
-    - required_comparisons: Number of comparisons needed for Bradley-Terry analysis
+    - required_comparisons: Estimated comparisons needed for convergence
     """
-    # Try to use actual block structure first, but only if n_cases matches the structure
-    try:
-        structure = get_bradley_terry_structure()
-        if structure and n_cases is not None:
-            # Check if the structure matches the requested n_cases
-            unique_cases = set(case['case_id'] for case in structure)
-            if len(unique_cases) == n_cases:
-                # Calculate exact comparisons from actual block structure
-                blocks = {}
-                for case in structure:
-                    block_num = case['block_number']
-                    if block_num not in blocks:
-                        blocks[block_num] = []
-                    blocks[block_num].append(case['case_id'])
-                
-                total_comparisons = 0
-                for block_cases in blocks.values():
-                    block_size = len(block_cases)
-                    block_comparisons = (block_size * (block_size - 1)) // 2
-                    total_comparisons += block_comparisons
-                
-                return total_comparisons
-    except:
-        # Fall back to mathematical calculation if structure unavailable
-        pass
-    
-    # Fallback: Mathematical calculation based on n_cases
     if n_cases is None or n_cases <= 0:
         return 0
     
-    # Bradley-Terry parameters
-    block_size = 15  # 12 core + 3 bridge cases per block
-    core_cases_per_block = 12
-    comparisons_per_block = (block_size * (block_size - 1)) // 2  # 105 comparisons per block
-    
-    if n_cases <= block_size:
-        # If sample fits in one block, use standard pairwise comparisons
-        return (n_cases * (n_cases - 1)) // 2
-    else:
-        # Calculate blocks needed for linked block design
-        num_blocks = (n_cases + core_cases_per_block - 1) // core_cases_per_block  # Ceiling division
-        return num_blocks * comparisons_per_block
+    # Import the estimation function from ASAP integration
+    try:
+        from utils.asap_integration import estimate_required_comparisons
+        return estimate_required_comparisons(n_cases)
+    except ImportError:
+        # Fallback: Use n * log2(n) * 2 formula
+        import math
+        if n_cases <= 1:
+            return 0
+        return int(n_cases * math.log2(n_cases) * 2)
 
 # Cache database counts for 30 seconds to avoid repeated queries
 @st.cache_data(ttl=30)

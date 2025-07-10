@@ -9,6 +9,7 @@ from config import GEMINI_MODELS, execute_sql, get_database_connection, get_gemi
 import json
 import os
 import time
+from pages.case_management_v2 import show_case_management_v2
 
 # Lazy imports for performance
 def _get_pandas():
@@ -46,7 +47,6 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
                 ec.extraction_id_2,
                 ec.winner_id,
                 ec.comparison_rationale,
-                ec.confidence_score,
                 ec.comparison_date,
                 c1.case_name as case_a_name,
                 c1.citation as case_a_citation,
@@ -74,7 +74,7 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
         # Convert to DataFrame for analysis
         comparison_df = pd.DataFrame(comparison_data, columns=[
             'comparison_id', 'extraction_id_1', 'extraction_id_2', 'winner_id', 'comparison_rationale',
-            'confidence_score', 'comparison_date', 'case_a_name', 'case_a_citation', 'case_a_year',
+            'comparison_date', 'case_a_name', 'case_a_citation', 'case_a_year',
             'case_b_name', 'case_b_citation', 'case_b_year', 'test_a_content', 'test_b_content',
             'test_a_novelty', 'test_b_novelty'
         ])
@@ -83,8 +83,8 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
         bradley_terry_stats = calculate_bradley_terry_statistics(comparison_df)
         
         # Show analysis in organized tabs
-        analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4, analysis_tab5 = st.tabs([
-            "📊 Overview", "🏆 Rankings", "📈 Temporal Analysis", "🔍 Reliability", "📈 Statistical Reliability"
+        analysis_tab1, analysis_tab2, analysis_tab3, analysis_tab4 = st.tabs([
+            "📊 Overview", "🏆 Rankings", "📈 Temporal Analysis", "🔍 Comprehensive Reliability"
         ])
         
         with analysis_tab1:
@@ -97,10 +97,7 @@ def show_bradley_terry_analysis(experiment_id, n_cases, total_tests, total_compa
             show_temporal_analysis(comparison_df, bradley_terry_stats)
         
         with analysis_tab4:
-            show_reliability_analysis(comparison_df, bradley_terry_stats)
-        
-        with analysis_tab5:
-            show_advanced_reliability_metrics(comparison_df, bradley_terry_stats)
+            show_comprehensive_reliability_analysis(comparison_df, bradley_terry_stats)
             
     except Exception as e:
         st.error(f"Error in Bradley-Terry analysis: {str(e)}")
@@ -615,64 +612,8 @@ def calculate_reliability_metrics(comparison_df):
     total_comparisons = len(comparison_df)
     decisive_comparisons = len(comparison_df[comparison_df['winner_id'].notna()])
     
-    # Calculate average confidence score
-    avg_confidence = comparison_df['confidence_score'].mean() if 'confidence_score' in comparison_df.columns else 0
-    
-    # Calculate temporal consistency (only meaningful for extended comparison periods)
-    temporal_consistency = None
-    temporal_consistency_note = "N/A (batch processing)"
-    
-    if 'comparison_date' in comparison_df.columns and len(comparison_df) > 1:
-        # Convert dates and check time span
-        comparison_df['comparison_date'] = pd.to_datetime(comparison_df['comparison_date'])
-        time_span = (comparison_df['comparison_date'].max() - comparison_df['comparison_date'].min()).days
-        
-        # Only calculate if comparisons span multiple days (meaningful temporal variation)
-        if time_span > 1:
-            df_sorted = comparison_df.sort_values('comparison_date')
-            
-            # Split comparisons into early and late periods
-            midpoint = len(df_sorted) // 2
-            early_comparisons = df_sorted.iloc[:midpoint]
-            late_comparisons = df_sorted.iloc[midpoint:]
-            
-            # Calculate win rates for each period
-            def get_win_rates(df_subset):
-                win_rates = {}
-                for _, row in df_subset.iterrows():
-                    id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
-                    
-                    for ext_id in [id_1, id_2]:
-                        if ext_id not in win_rates:
-                            win_rates[ext_id] = {'wins': 0, 'total': 0}
-                        win_rates[ext_id]['total'] += 1
-                        if winner_id == ext_id:
-                            win_rates[ext_id]['wins'] += 1
-                
-                # Convert to percentages
-                for ext_id in win_rates:
-                    if win_rates[ext_id]['total'] > 0:
-                        win_rates[ext_id] = win_rates[ext_id]['wins'] / win_rates[ext_id]['total']
-                    else:
-                        win_rates[ext_id] = 0
-                
-                return win_rates
-            
-            early_rates = get_win_rates(early_comparisons)
-            late_rates = get_win_rates(late_comparisons)
-            
-            # Calculate consistency (how similar the win rates are between periods)
-            common_extractions = set(early_rates.keys()) & set(late_rates.keys())
-            if common_extractions:
-                differences = [abs(early_rates[ext_id] - late_rates[ext_id]) for ext_id in common_extractions]
-                avg_difference = sum(differences) / len(differences)
-                temporal_consistency = 1.0 - avg_difference  # Higher = more consistent
-                temporal_consistency_note = f"Based on {time_span} day span"
-            else:
-                temporal_consistency = 0.5
-                temporal_consistency_note = "Insufficient overlap"
-        else:
-            temporal_consistency_note = "All comparisons same day"
+    # Calculate validation rate
+    validation_rate = len(comparison_df[comparison_df['winner_id'].notna()]) / len(comparison_df) if len(comparison_df) > 0 else 0
     
     # Calculate transitivity violations (A beats B, B beats C, C beats A)
     transitivity_score = calculate_transitivity_score(comparison_df)
@@ -681,9 +622,7 @@ def calculate_reliability_metrics(comparison_df):
         'total_comparisons': total_comparisons,
         'decisive_comparisons': decisive_comparisons,
         'decisiveness_rate': decisive_comparisons / total_comparisons if total_comparisons > 0 else 0,
-        'average_confidence': avg_confidence,
-        'temporal_consistency': temporal_consistency,
-        'temporal_consistency_note': temporal_consistency_note,
+        'average_confidence': validation_rate,
         'transitivity_score': transitivity_score
     }
 
@@ -754,8 +693,8 @@ def show_overview_statistics(comparison_df, bradley_terry_stats, n_cases, total_
         st.metric("Decisive Comparisons", f"{decisive_rate:.1%}")
     
     with col3:
-        avg_confidence = bradley_terry_stats['reliability_metrics']['average_confidence']
-        st.metric("Avg Confidence", f"{avg_confidence:.2f}" if avg_confidence > 0 else "N/A")
+        validation_rate = bradley_terry_stats['reliability_metrics']['average_confidence']
+        st.metric("Validation Rate", f"{validation_rate:.1%}" if validation_rate > 0 else "N/A")
     
     with col4:
         transitivity = bradley_terry_stats['reliability_metrics']['transitivity_score']
@@ -914,18 +853,31 @@ def show_temporal_analysis(comparison_df, bradley_terry_stats):
             
             with col1:
                 st.metric("Slope (β)", f"{slope:.6f}")
-                direction = "Increasing" if slope > 0 else "Decreasing" if slope < 0 else "Stable"
-                st.write(f"Trend: {direction}")
+                # Trend direction with emoji and color
+                if slope > 0:
+                    st.success("📈 Increasing trend")
+                elif slope < 0:
+                    st.error("📉 Decreasing trend")
+                else:
+                    st.info("➡️ Stable trend")
             
             with col2:
                 st.metric("R-squared", f"{r_squared:.4f}")
-                strength = "Strong" if r_squared > 0.7 else "Moderate" if r_squared > 0.3 else "Weak"
-                st.write(f"Relationship: {strength}")
+                # Relationship strength with emoji and color
+                if r_squared > 0.7:
+                    st.success("✅ Strong relationship")
+                elif r_squared > 0.3:
+                    st.info("⚠️ Moderate relationship")
+                else:
+                    st.warning("❌ Weak relationship")
             
             with col3:
                 st.metric("t-statistic", f"{t_stat:.3f}")
-                significance = "Significant" if abs(t_stat) > 2 else "Not significant"
-                st.write(f"Statistical: {significance}")
+                # Statistical significance with emoji and color
+                if abs(t_stat) > 2:
+                    st.success("✅ Statistically significant")
+                else:
+                    st.warning("❌ Not significant")
             
             # Interpretation
             st.write("**Interpretation:**")
@@ -988,22 +940,83 @@ def show_temporal_analysis(comparison_df, bradley_terry_stats):
                 st.write("")
                 st.write("**Interpretation:**")
                 if slope > 0:
-                    st.write("📈 Positive trend")
-                    st.write("Tests becoming more rule-like")
+                    st.success("📈 Positive trend - Tests becoming more rule-like")
                 elif slope < 0:
-                    st.write("📉 Negative trend") 
-                    st.write("Tests becoming more standard-like")
+                    st.error("📉 Negative trend - Tests becoming more standard-like")
                 else:
-                    st.write("➡️ No clear trend")
+                    st.info("➡️ No clear trend - Rule-likeness stable")
                 
                 st.write("")
                 st.metric("R²", f"{r_squared:.4f}")
                 if r_squared > 0.7:
-                    st.success("Strong fit")
+                    st.success("✅ Strong fit")
                 elif r_squared > 0.3:
-                    st.info("Moderate fit")
+                    st.info("⚠️ Moderate fit")
                 else:
-                    st.warning("Weak fit")
+                    st.warning("❌ Weak fit")
+            
+            # Correlation Analysis
+            st.subheader("🔗 Correlation Analysis")
+            
+            # Calculate correlation coefficients
+            from scipy.stats import pearsonr, spearmanr
+            
+            # Pearson correlation
+            pearson_corr, pearson_p = pearsonr(temporal_df['Year'], temporal_df['Rule_Likeness_Score'])
+            
+            # Spearman correlation
+            spearman_corr, spearman_p = spearmanr(temporal_df['Year'], temporal_df['Rule_Likeness_Score'])
+            
+            # Display correlation results
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Pearson Correlation (Linear):**")
+                st.metric("Correlation Coefficient", f"{pearson_corr:.4f}")
+                st.metric("P-value", f"{pearson_p:.4f}")
+                
+                # Interpretation
+                if pearson_p < 0.05:
+                    if abs(pearson_corr) > 0.7:
+                        st.success(f"✅ Strong {'positive' if pearson_corr > 0 else 'negative'} correlation")
+                    elif abs(pearson_corr) > 0.3:
+                        st.info(f"⚠️ Moderate {'positive' if pearson_corr > 0 else 'negative'} correlation")
+                    else:
+                        st.warning(f"❌ Weak {'positive' if pearson_corr > 0 else 'negative'} correlation")
+                else:
+                    st.warning("❌ No significant correlation")
+            
+            with col2:
+                st.write("**Spearman Correlation (Monotonic):**")
+                st.metric("Correlation Coefficient", f"{spearman_corr:.4f}")
+                st.metric("P-value", f"{spearman_p:.4f}")
+                
+                # Interpretation
+                if spearman_p < 0.05:
+                    if abs(spearman_corr) > 0.7:
+                        st.success(f"✅ Strong {'positive' if spearman_corr > 0 else 'negative'} monotonic trend")
+                    elif abs(spearman_corr) > 0.3:
+                        st.info(f"⚠️ Moderate {'positive' if spearman_corr > 0 else 'negative'} monotonic trend")
+                    else:
+                        st.warning(f"❌ Weak {'positive' if spearman_corr > 0 else 'negative'} monotonic trend")
+                else:
+                    st.warning("❌ No significant monotonic trend")
+            
+            # Correlation interpretation
+            st.write("**Combined Interpretation:**")
+            
+            # Compare Pearson vs Spearman
+            if abs(pearson_corr - spearman_corr) > 0.1:
+                st.info("📊 **Non-linear relationship detected**: Spearman correlation differs significantly from Pearson, suggesting a non-linear trend in rule-likeness over time.")
+            elif pearson_p < 0.05 and spearman_p < 0.05:
+                if pearson_corr > 0:
+                    st.success("📈 **Consistent positive relationship**: Both linear and monotonic tests confirm that rule-likeness increases over time.")
+                else:
+                    st.error("📉 **Consistent negative relationship**: Both linear and monotonic tests confirm that rule-likeness decreases over time.")
+            elif pearson_p < 0.05 or spearman_p < 0.05:
+                st.warning("⚠️ **Mixed evidence**: One correlation test is significant while the other is not, suggesting a complex relationship.")
+            else:
+                st.info("➡️ **No clear temporal relationship**: Neither correlation test shows a significant relationship between year and rule-likeness.")
             
             # Show detailed data table
             st.subheader("📋 Detailed Data")
@@ -1069,23 +1082,18 @@ def show_reliability_analysis(comparison_df, bradley_terry_stats):
             st.warning("❌ Low transitivity - significant inconsistencies detected")
     
     with col2:
-        st.write("**Temporal Consistency:**")
-        temporal_consistency = reliability['temporal_consistency']
-        temporal_note = reliability['temporal_consistency_note']
+        st.write("**Validation Rate:**")
+        validation_rate = reliability['average_confidence']
+        st.metric("Validation Rate", f"{validation_rate:.1%}")
         
-        if temporal_consistency is not None:
-            st.metric("Temporal Consistency", f"{temporal_consistency:.2f}")
-            
-            if temporal_consistency > 0.8:
-                st.success("✅ Results are stable over time")
-            elif temporal_consistency > 0.6:
-                st.info("⚠️ Moderate temporal stability")
-            else:
-                st.warning("❌ Results vary significantly over time")
+        if validation_rate > 0.9:
+            st.success("✅ Excellent validation rate")
+        elif validation_rate > 0.7:
+            st.info("⚠️ Good validation rate")
         else:
-            st.metric("Temporal Consistency", "N/A")
+            st.warning("❌ Low validation rate")
         
-        st.caption(f"📝 {temporal_note}")
+        st.caption("📝 Proportion of comparisons with decisive outcomes")
     
     # Recommendations
     st.subheader("💡 Recommendations")
@@ -1128,6 +1136,541 @@ def show_reliability_analysis(comparison_df, bradley_terry_stats):
             st.info("All cases are from the same year")
     else:
         st.info("No year data available for distribution analysis")
+
+def show_comprehensive_reliability_analysis(comparison_df, bradley_terry_stats):
+    """Show comprehensive reliability analysis with all Bradley-Terry diagnostics"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    
+    st.subheader("🔍 Comprehensive Reliability & Model Validation")
+    
+    # Basic reliability metrics (keeping useful ones from original)
+    reliability = bradley_terry_stats['reliability_metrics']
+    
+    # Overview metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Comparisons", reliability['total_comparisons'])
+    
+    with col2:
+        decisive_rate = reliability['decisiveness_rate']
+        st.metric("Decisive Rate", f"{decisive_rate:.1%}")
+        if decisive_rate > 0.9:
+            st.success("Excellent")
+        elif decisive_rate > 0.7:
+            st.info("Good")
+        else:
+            st.warning("Needs improvement")
+    
+    with col3:
+        transitivity = reliability['transitivity_score']
+        st.metric("Transitivity Score", f"{transitivity:.2f}")
+        if transitivity > 0.8:
+            st.success("High consistency")
+        elif transitivity > 0.6:
+            st.info("Moderate consistency")
+        else:
+            st.warning("Low consistency")
+    
+    with col4:
+        validation_rate = reliability.get('average_confidence', 0)
+        st.metric("Validation Rate", f"{validation_rate:.1%}")
+    
+    # Create comprehensive sub-tabs for different types of analysis
+    reliability_tab1, reliability_tab2, reliability_tab3, reliability_tab4, reliability_tab5 = st.tabs([
+        "🔗 Model Validation", "📊 Confidence Intervals", "🔄 Intransitivity Analysis", 
+        "📈 Goodness of Fit", "🌉 Bridge Case Stability"
+    ])
+    
+    with reliability_tab1:
+        show_model_validation_analysis(comparison_df, bradley_terry_stats)
+    
+    with reliability_tab2:
+        show_confidence_intervals_comprehensive(comparison_df, bradley_terry_stats)
+    
+    with reliability_tab3:
+        show_intransitivity_analysis(comparison_df, bradley_terry_stats)
+    
+    with reliability_tab4:
+        show_goodness_of_fit_analysis(comparison_df, bradley_terry_stats)
+    
+    with reliability_tab5:
+        show_bridge_case_stability_analysis(comparison_df, bradley_terry_stats)
+
+def show_model_validation_analysis(comparison_df, bradley_terry_stats):
+    """Show model mapping validation and algorithm equalization checks"""
+    np = _get_numpy()
+    st.subheader("🔗 Model Validation & Graph Connectivity")
+    
+    # Graph connectivity analysis
+    st.write("**Graph Connectivity Analysis:**")
+    
+    # Build adjacency matrix to check connectivity
+    extraction_ids = bradley_terry_stats['extraction_ids']
+    n_items = len(extraction_ids)
+    
+    # Create adjacency matrix
+    adj_matrix = np.zeros((n_items, n_items))
+    id_to_idx = {ext_id: i for i, ext_id in enumerate(extraction_ids)}
+    
+    for _, row in comparison_df.iterrows():
+        if row['extraction_id_1'] in id_to_idx and row['extraction_id_2'] in id_to_idx:
+            i = id_to_idx[row['extraction_id_1']]
+            j = id_to_idx[row['extraction_id_2']]
+            adj_matrix[i, j] = 1
+            adj_matrix[j, i] = 1
+    
+    # Check connectivity using simple BFS
+    def is_connected(matrix):
+        n = len(matrix)
+        if n == 0:
+            return True
+        
+        visited = [False] * n
+        queue = [0]
+        visited[0] = True
+        visited_count = 1
+        
+        while queue:
+            current = queue.pop(0)
+            for neighbor in range(n):
+                if matrix[current][neighbor] > 0 and not visited[neighbor]:
+                    visited[neighbor] = True
+                    visited_count += 1
+                    queue.append(neighbor)
+        
+        return visited_count == n
+    
+    is_graph_connected = is_connected(adj_matrix)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Graph Connectivity", "✅ Connected" if is_graph_connected else "❌ Disconnected")
+        if is_graph_connected:
+            st.success("All cases are connected through comparisons - rankings are valid")
+        else:
+            st.error("Graph is disconnected - some cases cannot be compared")
+    
+    with col2:
+        # Calculate average connectivity
+        connections_per_case = adj_matrix.sum(axis=1)
+        avg_connections = connections_per_case.mean()
+        st.metric("Avg Connections per Case", f"{avg_connections:.1f}")
+        
+        if avg_connections > 5:
+            st.success("Well-connected graph")
+        elif avg_connections > 3:
+            st.info("Moderately connected")
+        else:
+            st.warning("Sparsely connected")
+    
+    # Algorithm convergence information
+    st.write("**Algorithm Convergence:**")
+    
+    # Check if we have convergence information
+    separation_data = bradley_terry_stats.get('separation_reliability', {})
+    if 'reliability' in separation_data:
+        reliability_coef = separation_data['reliability']
+        st.metric("Item Separation Reliability", f"{reliability_coef:.3f}")
+        
+        if reliability_coef > 0.8:
+            st.success("✅ Excellent separation - rankings are highly reliable")
+        elif reliability_coef > 0.6:
+            st.info("⚠️ Good separation - rankings are moderately reliable")
+        else:
+            st.warning("❌ Poor separation - rankings may be unreliable")
+    
+    # Model diagnostics
+    diagnostics = bradley_terry_stats.get('model_diagnostics', {})
+    if diagnostics:
+        st.write("**Model Diagnostics:**")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if 'overdispersion_ratio' in diagnostics:
+                overdispersion = diagnostics['overdispersion_ratio']
+                st.metric("Overdispersion Ratio", f"{overdispersion:.3f}")
+                
+                if 0.8 <= overdispersion <= 1.2:
+                    st.success("✅ Good model fit")
+                elif 0.6 <= overdispersion <= 1.4:
+                    st.info("⚠️ Acceptable model fit")
+                else:
+                    st.warning("❌ Poor model fit - consider model revision")
+        
+        with col2:
+            if 'degrees_freedom' in diagnostics:
+                df = diagnostics['degrees_freedom']
+                st.metric("Degrees of Freedom", f"{df}")
+
+def show_confidence_intervals_comprehensive(comparison_df, bradley_terry_stats):
+    """Show comprehensive confidence intervals analysis"""
+    pd = _get_pandas()
+    st.subheader("📊 Confidence Intervals & Standard Errors")
+    
+    ci_data = bradley_terry_stats.get('confidence_intervals', {})
+    
+    if 'error' in ci_data:
+        st.error(f"Error calculating confidence intervals: {ci_data.get('error', 'Unknown error')}")
+        return
+    
+    if 'confidence_intervals' not in ci_data:
+        st.warning("Confidence intervals not available. Please re-run the analysis.")
+        return
+    
+    # Create comprehensive table with all confidence interval information
+    intervals = ci_data['confidence_intervals']
+    scores = bradley_terry_stats['bradley_terry_scores']
+    
+    # Build comprehensive table
+    table_data = []
+    for ext_id in bradley_terry_stats['extraction_ids']:
+        if ext_id in intervals:
+            interval = intervals[ext_id]
+            case_name = f"Case {ext_id}"  # This could be enhanced with actual case names
+            
+            # Find case name from comparison data
+            for _, row in comparison_df.iterrows():
+                if row['extraction_id_1'] == ext_id:
+                    case_name = row['case_a_name']
+                    break
+                elif row['extraction_id_2'] == ext_id:
+                    case_name = row['case_b_name']
+                    break
+            
+            table_data.append({
+                'Case': case_name,
+                'Bradley-Terry Score': scores[ext_id],
+                'Standard Error': ci_data.get('standard_errors', {}).get(ext_id, 0),
+                'Lower CI (95%)': interval['lower'],
+                'Upper CI (95%)': interval['upper'],
+                'Margin of Error': interval['margin_error'],
+                'Confidence Level': 'High' if interval['margin_error'] < 0.1 else 'Medium' if interval['margin_error'] < 0.2 else 'Low'
+            })
+    
+    if table_data:
+        df = pd.DataFrame(table_data)
+        df = df.round(4)
+        
+        # Display table
+        st.dataframe(df, use_container_width=True)
+        
+        # Summary statistics
+        st.write("**Summary Statistics:**")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            avg_margin = df['Margin of Error'].mean()
+            st.metric("Average Margin of Error", f"{avg_margin:.4f}")
+        
+        with col2:
+            high_confidence_count = (df['Confidence Level'] == 'High').sum()
+            st.metric("High Confidence Cases", f"{high_confidence_count}/{len(df)}")
+        
+        with col3:
+            score_range = df['Bradley-Terry Score'].max() - df['Bradley-Terry Score'].min()
+            st.metric("Score Range", f"{score_range:.4f}")
+        
+        # Download option
+        csv = df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Confidence Intervals Table",
+            data=csv,
+            file_name=f"confidence_intervals_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+def show_intransitivity_analysis(comparison_df, bradley_terry_stats):
+    """Show intransitivity and cycle detection analysis"""
+    st.subheader("🔄 Intransitivity & Cycle Analysis")
+    
+    # Build comparison graph for cycle detection
+    extraction_ids = bradley_terry_stats['extraction_ids']
+    scores = bradley_terry_stats['bradley_terry_scores']
+    
+    # Create directed graph based on comparisons
+    wins = {}
+    for _, row in comparison_df.iterrows():
+        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+        
+        if winner_id == id_1:
+            if id_1 not in wins:
+                wins[id_1] = set()
+            wins[id_1].add(id_2)
+        elif winner_id == id_2:
+            if id_2 not in wins:
+                wins[id_2] = set()
+            wins[id_2].add(id_1)
+    
+    # Detect cycles and calculate intransitivity
+    def find_cycles(graph, max_length=3):
+        """Find cycles in the comparison graph"""
+        cycles = []
+        
+        def dfs(node, path, visited):
+            if len(path) > max_length:
+                return
+            
+            if node in visited and node == path[0] and len(path) > 2:
+                cycles.append(path[:])
+                return
+            
+            if node in visited:
+                return
+            
+            visited.add(node)
+            
+            for neighbor in graph.get(node, []):
+                dfs(neighbor, path + [neighbor], visited.copy())
+        
+        for start_node in graph:
+            dfs(start_node, [start_node], set())
+        
+        return cycles
+    
+    cycles = find_cycles(wins)
+    
+    # Calculate intransitivity metrics (only for triplets with complete comparison data)
+    total_triplets = 0
+    intransitive_triplets = 0
+    
+    # Check all possible triplets, but only count those with complete comparison data
+    for i, id_a in enumerate(extraction_ids):
+        for j, id_b in enumerate(extraction_ids):
+            if i >= j:
+                continue
+            for k, id_c in enumerate(extraction_ids):
+                if j >= k:
+                    continue
+                
+                # Check if we have comparison results for all pairs in this triplet
+                a_beats_b = id_b in wins.get(id_a, set())
+                b_beats_a = id_a in wins.get(id_b, set())
+                b_beats_c = id_c in wins.get(id_b, set())
+                c_beats_b = id_b in wins.get(id_c, set())
+                c_beats_a = id_a in wins.get(id_c, set())
+                a_beats_c = id_c in wins.get(id_a, set())
+                
+                # Only count triplets where we have complete comparison data
+                has_ab_comparison = a_beats_b or b_beats_a
+                has_bc_comparison = b_beats_c or c_beats_b
+                has_ca_comparison = c_beats_a or a_beats_c
+                
+                if has_ab_comparison and has_bc_comparison and has_ca_comparison:
+                    total_triplets += 1
+                    
+                    # Check for intransitivity: A > B > C but C > A
+                    if a_beats_b and b_beats_c and c_beats_a:
+                        intransitive_triplets += 1
+    
+    # Display results
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Cycles Found", len(cycles))
+        if len(cycles) == 0:
+            st.success("✅ No cycles detected")
+        else:
+            st.warning(f"⚠️ {len(cycles)} cycles found")
+    
+    with col2:
+        intransitivity_rate = intransitive_triplets / total_triplets if total_triplets > 0 else 0
+        st.metric("Intransitivity Rate", f"{intransitivity_rate:.2%}")
+        st.caption(f"({intransitive_triplets}/{total_triplets} triplets)")
+        
+        if intransitivity_rate < 0.05:
+            st.success("✅ Very low intransitivity")
+        elif intransitivity_rate < 0.15:
+            st.info("⚠️ Moderate intransitivity")
+        else:
+            st.warning("❌ High intransitivity")
+    
+    with col3:
+        consistency_score = 1 - intransitivity_rate
+        st.metric("Consistency Score", f"{consistency_score:.2f}")
+    
+    # Show cycle details if any exist
+    if cycles:
+        st.write("**Detected Cycles:**")
+        for i, cycle in enumerate(cycles[:5]):  # Show first 5 cycles
+            cycle_str = " → ".join([f"Case {node}" for node in cycle])
+            st.write(f"Cycle {i+1}: {cycle_str}")
+        
+        if len(cycles) > 5:
+            st.write(f"... and {len(cycles) - 5} more cycles")
+    
+    # Explanation
+    st.write("**Interpretation:**")
+    st.info(f"""
+    - **Cycles**: Direct circular preferences (A > B > C > A) found in the comparison graph
+    - **Intransitivity Rate**: Proportion of fully-compared triplets showing inconsistent preferences
+    - **Consistency Score**: Overall logical consistency of the comparison results
+    - **Total Triplets Analyzed**: {total_triplets} (only triplets with complete comparison data)
+    - Lower intransitivity and higher consistency indicate more reliable Bradley-Terry rankings
+    
+    Note: Cycles and intransitivity rate may differ because cycles require direct comparison chains, 
+    while intransitivity rate examines all possible triplets with complete comparison data.
+    """)
+
+def show_goodness_of_fit_analysis(comparison_df, bradley_terry_stats):
+    """Show goodness of fit analysis including likelihood-ratio and Hosmer-Lemeshow tests"""
+    pd = _get_pandas()
+    np = _get_numpy()
+    st.subheader("📈 Goodness of Fit Analysis")
+    
+    scores = bradley_terry_stats['bradley_terry_scores']
+    
+    # Likelihood-ratio test
+    st.write("**Likelihood-Ratio Test:**")
+    
+    # Calculate log-likelihood for Bradley-Terry model
+    def calculate_log_likelihood(comparison_df, scores):
+        log_likelihood = 0
+        for _, row in comparison_df.iterrows():
+            id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+            
+            if id_1 in scores and id_2 in scores:
+                p_1 = scores[id_1]
+                p_2 = scores[id_2]
+                
+                # Bradley-Terry probability
+                prob_1_wins = p_1 / (p_1 + p_2) if (p_1 + p_2) > 0 else 0.5
+                
+                if winner_id == id_1:
+                    log_likelihood += np.log(prob_1_wins) if prob_1_wins > 0 else -np.inf
+                elif winner_id == id_2:
+                    log_likelihood += np.log(1 - prob_1_wins) if prob_1_wins < 1 else -np.inf
+        
+        return log_likelihood
+    
+    # Calculate null model log-likelihood (all equal probability)
+    null_log_likelihood = len(comparison_df) * np.log(0.5)
+    
+    # Calculate Bradley-Terry model log-likelihood
+    bt_log_likelihood = calculate_log_likelihood(comparison_df, scores)
+    
+    # Likelihood ratio test statistic
+    lr_statistic = 2 * (bt_log_likelihood - null_log_likelihood)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Log-Likelihood (BT)", f"{bt_log_likelihood:.2f}")
+        st.metric("Log-Likelihood (Null)", f"{null_log_likelihood:.2f}")
+    
+    with col2:
+        st.metric("LR Statistic", f"{lr_statistic:.2f}")
+        # Simplified interpretation
+        if lr_statistic > 10:
+            st.success("✅ Strong evidence for BT model")
+        elif lr_statistic > 5:
+            st.info("⚠️ Moderate evidence for BT model")
+        else:
+            st.warning("❌ Weak evidence for BT model")
+    
+    # Hosmer-Lemeshow-style test
+    st.write("**Calibration Analysis:**")
+    
+    # Calculate predicted vs observed win rates in deciles
+    predicted_probs = []
+    observed_outcomes = []
+    
+    for _, row in comparison_df.iterrows():
+        id_1, id_2, winner_id = row['extraction_id_1'], row['extraction_id_2'], row['winner_id']
+        
+        if id_1 in scores and id_2 in scores:
+            p_1 = scores[id_1]
+            p_2 = scores[id_2]
+            
+            prob_1_wins = p_1 / (p_1 + p_2) if (p_1 + p_2) > 0 else 0.5
+            predicted_probs.append(prob_1_wins)
+            observed_outcomes.append(1 if winner_id == id_1 else 0)
+    
+    if predicted_probs:
+        # Create deciles
+        combined_data = list(zip(predicted_probs, observed_outcomes))
+        combined_data.sort(key=lambda x: x[0])
+        
+        n_deciles = min(10, len(combined_data) // 10)
+        decile_size = len(combined_data) // n_deciles
+        
+        calibration_data = []
+        for i in range(n_deciles):
+            start_idx = i * decile_size
+            end_idx = (i + 1) * decile_size if i < n_deciles - 1 else len(combined_data)
+            
+            decile_data = combined_data[start_idx:end_idx]
+            predicted_mean = np.mean([x[0] for x in decile_data])
+            observed_mean = np.mean([x[1] for x in decile_data])
+            
+            calibration_data.append({
+                'Decile': i + 1,
+                'Predicted': predicted_mean,
+                'Observed': observed_mean,
+                'Difference': abs(predicted_mean - observed_mean)
+            })
+        
+        cal_df = pd.DataFrame(calibration_data)
+        
+        # Display calibration table
+        st.dataframe(cal_df.round(4), use_container_width=True)
+        
+        # Calculate overall calibration
+        avg_difference = cal_df['Difference'].mean()
+        st.metric("Average Calibration Error", f"{avg_difference:.4f}")
+        
+        if avg_difference < 0.05:
+            st.success("✅ Excellent calibration")
+        elif avg_difference < 0.1:
+            st.info("⚠️ Good calibration")
+        else:
+            st.warning("❌ Poor calibration")
+
+def show_bridge_case_stability_analysis(comparison_df, bradley_terry_stats):
+    """Show bridge case stability testing"""
+    np = _get_numpy()
+    st.subheader("🌉 Bridge Case Stability Analysis")
+    
+    # This would require access to the Bradley-Terry structure
+    # For now, provide a framework
+    
+    st.write("**Bridge Case Analysis:**")
+    st.info("Bridge case stability testing evaluates how stable the rankings are when bridge cases are removed or modified.")
+    
+    # Placeholder for bridge case analysis
+    scores = bradley_terry_stats['bradley_terry_scores']
+    
+    # Calculate score stability metrics
+    score_values = list(scores.values())
+    if score_values:
+        score_std = np.std(score_values)
+        score_range = max(score_values) - min(score_values)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Score Standard Deviation", f"{score_std:.4f}")
+            if score_std > 0.2:
+                st.success("✅ Good score separation")
+            else:
+                st.warning("⚠️ Limited score separation")
+        
+        with col2:
+            st.metric("Score Range", f"{score_range:.4f}")
+            if score_range > 0.5:
+                st.success("✅ Wide score range")
+            else:
+                st.info("⚠️ Narrow score range")
+    
+    # Bridge case stability recommendations
+    st.write("**Recommendations:**")
+    st.write("• Ensure bridge cases are well-distributed across the score range")
+    st.write("• Test ranking stability by removing individual bridge cases")
+    st.write("• Monitor changes in confidence intervals when bridge cases are modified")
+    st.write("• Consider additional bridge cases if rankings show high sensitivity")
 
 def show_advanced_reliability_metrics(comparison_df, bradley_terry_stats):
     """Show advanced statistical reliability metrics for Bradley-Terry model"""
@@ -1565,7 +2108,7 @@ def run_extraction_for_experiment(experiment_id):
                            'temperature', 'top_p', 'top_k', 'max_output_tokens', 
                            'extraction_strategy', 'extraction_prompt', 'comparison_prompt',
                            'system_instruction', 'cost_limit_usd', 'created_date',
-                           'modified_date', 'created_by'], exp))
+                           'modified_date', 'created_by', 'sample_group_id'], exp))
         
         # Get API key from session state
         if 'api_key' not in st.session_state or not st.session_state.api_key:
@@ -1574,19 +2117,25 @@ def run_extraction_for_experiment(experiment_id):
             
         api_key = st.session_state.api_key
             
-        # Get cases that need extraction (using global selected cases pool for now)
+        # Get cases from sample group that need extraction
+        sample_group_id = exp_dict.get('sample_group_id')
+        if not sample_group_id:
+            st.error("This experiment doesn't have a sample group assigned. Please configure a sample group for this experiment.")
+            return
+            
         cases_to_extract = execute_sql("""
             SELECT c.case_id, c.case_name, c.citation, c.case_text, c.case_length
             FROM v2_cases c
-            JOIN v2_experiment_selected_cases esc ON c.case_id = esc.case_id
-            WHERE c.case_id NOT IN (
+            JOIN v2_sample_group_members sgm ON c.case_id = sgm.case_id
+            WHERE sgm.group_id = ? 
+            AND c.case_id NOT IN (
                 SELECT case_id FROM v2_experiment_extractions 
                 WHERE experiment_id = ?
             )
-        """, (experiment_id,), fetch=True)
+        """, (sample_group_id, experiment_id), fetch=True)
         
         if not cases_to_extract:
-            st.info("No cases need extraction for this experiment. Make sure cases are selected for experiments in the Cases section.")
+            st.info("No cases need extraction for this experiment. All cases from the sample group have been processed.")
             return
             
         # Load extraction prompt from experiment configuration or file
@@ -1691,11 +2240,11 @@ def run_extraction_for_experiment(experiment_id):
                     INSERT INTO v2_experiment_extractions 
                     (experiment_id, case_id, legal_test_name, legal_test_content, 
                      extraction_rationale, test_passages, test_novelty,
-                     rule_like_score, confidence_score, validation_status, api_cost_usd)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     validation_status, api_cost_usd)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (experiment_id, case_id, f"Legal Test from {case_name}", legal_test,
                       "AI extracted legal test using structured output", passages, test_novelty,
-                      0.5, 0.8, 'pending', case_cost))
+                      'pending', case_cost))
                 
                 # Small delay to avoid rate limiting
                 time.sleep(0.1)
@@ -1736,6 +2285,11 @@ def run_extraction_for_experiment(experiment_id):
 
 def run_comparisons_for_experiment(experiment_id):
     """Execute pairwise comparisons for an experiment"""
+    # Check if comparisons are already running to prevent interference
+    if st.session_state.get('comparisons_running', False):
+        st.warning("⚠️ Comparisons are already running. Please wait for them to complete.")
+        return
+        
     try:
         # Get experiment configuration
         exp = execute_sql("SELECT * FROM v2_experiments WHERE experiment_id = ?", (experiment_id,), fetch=True)
@@ -1748,7 +2302,7 @@ def run_comparisons_for_experiment(experiment_id):
                            'temperature', 'top_p', 'top_k', 'max_output_tokens', 
                            'extraction_strategy', 'extraction_prompt', 'comparison_prompt',
                            'system_instruction', 'cost_limit_usd', 'created_date',
-                           'modified_date', 'created_by'], exp))
+                           'modified_date', 'created_by', 'sample_group_id'], exp))
         
         # Get API key from session state
         if 'api_key' not in st.session_state or not st.session_state.api_key:
@@ -1757,12 +2311,34 @@ def run_comparisons_for_experiment(experiment_id):
             
         api_key = st.session_state.api_key
             
-        # Get comparison pairs that need processing
-        comparison_pairs, pair_block_info = generate_bradley_terry_comparison_pairs()
-        
-        if not comparison_pairs:
-            st.info("No comparison pairs found. Please ensure Bradley-Terry structure is generated.")
+        # Check if experiment has sample group
+        sample_group_id = exp_dict.get('sample_group_id')
+        if not sample_group_id:
+            st.error("This experiment doesn't have a sample group assigned. Please configure a sample group for this experiment.")
             return
+            
+        # Get extractions for this experiment
+        extractions = execute_sql("""
+            SELECT extraction_id, case_id, legal_test_content 
+            FROM v2_experiment_extractions 
+            WHERE experiment_id = ?
+        """, (experiment_id,), fetch=True)
+        
+        if not extractions:
+            st.error("No extractions found for this experiment. Please run extractions first.")
+            return
+        
+        
+        # Use ASAP active sampling for comparison pairs
+        from utils.asap_integration import ASAPSampler
+        
+        # Initialize ASAP sampler with extractions
+        n_items = len(extractions)
+        if n_items < 2:
+            st.error("Need at least 2 extractions to run comparisons.")
+            return
+            
+        asap_sampler = ASAPSampler(n_items)
             
         # Get already completed comparisons
         completed_comparisons = execute_sql("""
@@ -1836,38 +2412,173 @@ def run_comparisons_for_experiment(experiment_id):
             system_instruction=system_instruction
         )
         
-        # Create progress placeholder
+        # Initialize ASAP active sampling with real-time progress
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
         
-        pairs_to_process = []
-        for case_id_1, case_id_2 in comparison_pairs:
-            if case_id_1 in extraction_map and case_id_2 in extraction_map:
-                ext_1 = extraction_map[case_id_1]
-                ext_2 = extraction_map[case_id_2]
-                if (ext_1[0], ext_2[0]) not in completed_pairs and (ext_2[0], ext_1[0]) not in completed_pairs:
-                    pairs_to_process.append((ext_1, ext_2))
+        # Initialize ASAP sampler with current comparison state
+        st.info("🔄 Loading ASAP state from database...")
+        import time
+        start_time = time.time()
+        asap_sampler.load_state_from_database(experiment_id)
+        load_time = time.time() - start_time
+        st.info(f"✅ ASAP loaded: {asap_sampler.get_total_comparisons()} comparisons, iteration {asap_sampler.iteration} (took {load_time:.1f}s)")
         
-        if not pairs_to_process:
-            st.info("No comparison pairs need processing.")
-            return
-            
-        total_pairs = len(pairs_to_process)
+        
         total_cost = 0.0
+        iteration = 0
+        max_iterations = 1000  # Safety limit
         
-        status_placeholder.info(f"Starting comparisons for {total_pairs} pairs...")
+        # Get case names for display (optimized single query)
+        st.info("🔄 Loading case names...")
+        start_time = time.time()
+        case_ids = [str(ext[1]) for ext in extractions]
+        case_names_query = execute_sql(f"""
+            SELECT case_id, case_name FROM v2_cases 
+            WHERE case_id IN ({','.join(['?'] * len(case_ids))})
+        """, case_ids, fetch=True)
         
-        # Process each pair
-        for i, (ext_1, ext_2) in enumerate(pairs_to_process):
+        case_names = {}
+        for case_id, case_name in case_names_query:
+            case_names[case_id] = case_name[:30] + "..." if len(case_name) > 30 else case_name
+        names_time = time.time() - start_time
+        st.info(f"✅ Case names loaded ({names_time:.1f}s)")
+        # Show initial sampling method
+        sampling_method = asap_sampler.get_sampling_method()
+        if "Random" in sampling_method:
+            status_placeholder.info("🎲 **Random Sampling** - Building initial comparison data...")
+        else:
+            status_placeholder.info("🎯 **ASAP Active Sampling** - Finding most informative comparisons...")
+        
+        # Set flag to indicate comparisons are running (prevents UI interference)
+        st.session_state['comparisons_running'] = True
+        
+        # Active sampling loop
+        current_method = None
+        blocked_comparisons = []  # Track blocked comparisons for summary
+        while iteration < max_iterations:
+            # Check if sampling method has changed
+            sampling_method = asap_sampler.get_sampling_method()
+            if sampling_method != current_method:
+                current_method = sampling_method
+                if "Random" in sampling_method:
+                    status_placeholder.info("🎲 **Random Sampling** - Building initial comparison data...")
+                else:
+                    status_placeholder.success("🎯 **Switched to ASAP Active Sampling** - Now using intelligent pair selection!")
+                    time.sleep(1)  # Brief pause to highlight the switch
+            
+            # Get next most informative comparison pair
+            next_pair = asap_sampler.get_next_pair()
+            
+            if next_pair is None:
+                st.info(f"🛑 **Stopping**: No more pairs available (iteration {iteration})")
+                # Debug: Check why no pairs available
+                total_comparisons = asap_sampler.get_total_comparisons()
+                convergence = asap_sampler.check_convergence()
+                st.info(f"📊 **Debug**: Total comparisons in matrix: {total_comparisons}, Converged: {convergence}")
+                break  # Convergence reached or no more useful pairs
+            
+            idx_1, idx_2 = next_pair
+            ext_1 = extractions[idx_1]
+            ext_2 = extractions[idx_2]
+            
+            # Check if this pair was already compared
+            existing = execute_sql("""
+                SELECT comparison_id FROM v2_experiment_comparisons 
+                WHERE experiment_id = ? AND (
+                    (extraction_id_1 = ? AND extraction_id_2 = ?) OR
+                    (extraction_id_1 = ? AND extraction_id_2 = ?)
+                )
+            """, (experiment_id, ext_1[0], ext_2[0], ext_2[0], ext_1[0]), fetch=True)
+            
+            if existing:
+                # Pair already compared, get the actual winner and update ASAP state
+                winner_query = execute_sql("SELECT winner_id FROM v2_experiment_comparisons WHERE comparison_id = ?", (existing[0][0],), fetch=True)
+                if winner_query:
+                    winner_id = winner_query[0][0]
+                    result = 1 if winner_id == ext_1[0] else 0
+                    asap_sampler.add_comparison_result(idx_1, idx_2, result)
+                continue
+            
+            iteration += 1
+            
             try:
-                # Update progress
-                progress_placeholder.progress((i + 1) / total_pairs, text=f"Comparing pair {i + 1}/{total_pairs}")
+                # Display current comparison details (single updating line)
+                case_a = case_names.get(ext_1[1], f"Case {ext_1[1]}")
+                case_b = case_names.get(ext_2[1], f"Case {ext_2[1]}")
+                
+                progress_placeholder.info(f"🔍 **Comparison {iteration}** | **Test A**: {case_a} vs **Test B**: {case_b}")
                 
                 # Prepare the prompt
                 full_prompt = f"{comparison_prompt}\n\nTest A: {ext_1[2]}\n\nTest B: {ext_2[2]}"
                 
-                # Call Gemini API
-                response = model.generate_content(full_prompt)
+                # Call Gemini API with error handling and retry logic
+                max_retries = 3
+                retry_count = 0
+                response = None
+                
+                while retry_count < max_retries:
+                    try:
+                        response = model.generate_content(full_prompt)
+                        break  # Success, exit retry loop
+                    except Exception as api_error:
+                        retry_count += 1
+                        if "rate" in str(api_error).lower() or "quota" in str(api_error).lower():
+                            st.warning(f"⚠️ Rate limit hit on comparison {iteration}. Retry {retry_count}/{max_retries}...")
+                            time.sleep(2 ** retry_count)  # Exponential backoff
+                        else:
+                            st.warning(f"⚠️ API error on comparison {iteration}: {str(api_error)}")
+                            if retry_count >= max_retries:
+                                continue  # Skip this comparison
+                            time.sleep(1)
+                
+                if response is None:
+                    st.error(f"❌ Failed to get response for comparison {iteration} after {max_retries} retries. Skipping.")
+                    continue
+                
+                # Check if response is valid before accessing text
+                if not response.candidates or not response.candidates[0].content.parts:
+                    # Handle blocked or empty response
+                    if hasattr(response.candidates[0], 'finish_reason') and response.candidates[0].finish_reason == 2:
+                        st.error(f"""
+                        🚫 **Content Blocked by Safety Filters** (Comparison {iteration})
+                        
+                        **Case A**: {case_a} (ID: {ext_1[1]}, Extraction ID: {ext_1[0]})
+                        **Case B**: {case_b} (ID: {ext_2[1]}, Extraction ID: {ext_2[0]})
+                        
+                        This comparison was blocked by Gemini's safety filters. This typically happens when:
+                        - The case contains graphic violence or disturbing content
+                        - The legal test includes sensitive subject matter
+                        - The content triggers automated content policy filters
+                        
+                        **Action Required**: Review these cases manually to determine if they should be:
+                        1. Excluded from the experiment
+                        2. Manually compared with appropriate context
+                        3. Re-extracted with different prompts
+                        """)
+                        
+                        # Log blocked cases to database for later review
+                        execute_sql("""
+                            INSERT INTO v2_experiment_comparisons 
+                            (experiment_id, extraction_id_1, extraction_id_2, winner_id, 
+                             comparison_rationale, comparison_date, ai_model, human_validated)
+                            VALUES (?, ?, ?, NULL, 'BLOCKED: Content filtered by Gemini safety filters', 
+                                   CURRENT_TIMESTAMP, ?, FALSE)
+                        """, (experiment_id, ext_1[0], ext_2[0], model_name))
+                        
+                        # Track blocked comparisons for summary
+                        blocked_comparisons.append({
+                            'case_a': case_a,
+                            'case_a_id': ext_1[1],
+                            'case_b': case_b,
+                            'case_b_id': ext_2[1],
+                            'iteration': iteration
+                        })
+                        
+                        continue
+                    else:
+                        st.warning(f"⚠️ Comparison {iteration}: Empty response from Gemini. Skipping this pair.")
+                        continue
                 
                 # Parse structured JSON response
                 try:
@@ -1877,34 +2588,76 @@ def run_comparisons_for_experiment(experiment_id):
                     
                     # Determine winner based on structured response
                     winner_id = ext_1[0] if more_rule_like_test == "Test A" else ext_2[0]
+                    winner_name = case_a if more_rule_like_test == "Test A" else case_b
                     
                 except json.JSONDecodeError:
                     # Fallback if JSON parsing fails
                     response_text = response.text
                     winner_id = ext_1[0] if "Test A" in response_text else ext_2[0]
+                    winner_name = case_a if "Test A" in response_text else case_b
                     reasoning = response_text
                 
-                # Calculate cost (simplified)
+                # Calculate cost
                 input_tokens = len(full_prompt.split()) * 1.3
                 output_tokens = len(response.text.split()) * 1.3
                 model_pricing = GEMINI_MODELS.get(exp_dict['ai_model'], {'input': 0.30, 'output': 2.50})
                 pair_cost = (input_tokens / 1_000_000) * model_pricing['input'] + (output_tokens / 1_000_000) * model_pricing['output']
                 total_cost += pair_cost
                 
-                # Store in database with structured fields
+                # Store comparison result in database
                 execute_sql("""
                     INSERT INTO v2_experiment_comparisons 
                     (experiment_id, extraction_id_1, extraction_id_2, winner_id, 
-                     comparison_rationale, confidence_score, api_cost_usd)
+                     comparison_rationale, api_cost_usd, sampling_iteration)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (experiment_id, ext_1[0], ext_2[0], winner_id, reasoning, 0.8, pair_cost))
+                """, (experiment_id, ext_1[0], ext_2[0], winner_id, reasoning, pair_cost, iteration))
                 
-                # Small delay to avoid rate limiting
-                time.sleep(0.1)
+                # Update ASAP state with result
+                result = 1 if winner_id == ext_1[0] else 0
+                asap_sampler.add_comparison_result(idx_1, idx_2, result)
+                
+                # Check for convergence
+                spearman_corr = asap_sampler.get_spearman_correlation()
+                coverage_stats = asap_sampler.get_coverage_stats()
+                
+                if spearman_corr is not None:
+                    convergence_status = "✅ CONVERGED" if spearman_corr > 0.99 else f"📊 {spearman_corr:.4f}"
+                    converged = spearman_corr > 0.99
+                else:
+                    # Show coverage progress instead of just "Initializing..."
+                    coverage_pct = coverage_stats.get('coverage_percent', 0)
+                    compared = coverage_stats.get('compared', 0)
+                    total = coverage_stats.get('total', 0)
+                    convergence_status = f"📊 Coverage: {compared}/{total} ({coverage_pct:.1f}%)"
+                    converged = False
+                
+                # Update single progress line with winner, correlation, and sampling method
+                method_icon = "🎲" if "Random" in sampling_method else "🎯"
+                method_short = "Random" if "Random" in sampling_method else "ASAP"
+                progress_placeholder.success(
+                    f"🏆 **Winner**: {winner_name} | {method_icon} **Method**: {method_short} | **Spearman**: {convergence_status} | **Cost**: ${total_cost:.2f} | **Iteration**: {iteration}"
+                )
+                
+                # Save ASAP state to database
+                asap_sampler.save_state_to_database(experiment_id)
+                
+                # Check convergence
+                if converged:
+                    status_placeholder.success(f"🎉 **Convergence Reached!** Spearman correlation: {spearman_corr:.4f} > 0.99")
+                    break
+                
+                # Small delay to avoid rate limiting and let user see progress
+                time.sleep(0.5)
+                
+                # Remove periodic rerun to prevent interrupting the comparison loop
+                # The progress updates will show without forcing a rerun
                 
             except Exception as e:
-                st.error(f"Error processing comparison pair {i + 1}: {str(e)}")
+                st.error(f"Error processing comparison {iteration}: {str(e)}")
                 continue
+        
+        # Clear the comparisons running flag
+        st.session_state['comparisons_running'] = False
         
         # Update experiment status
         execute_sql("UPDATE v2_experiments SET modified_date = CURRENT_TIMESTAMP WHERE experiment_id = ?", (experiment_id,))
@@ -1920,14 +2673,65 @@ def run_comparisons_for_experiment(experiment_id):
             execute_sql("UPDATE v2_experiments SET status = 'complete', modified_date = CURRENT_TIMESTAMP WHERE experiment_id = ?", (experiment_id,))
         
         progress_placeholder.empty()
-        status_placeholder.success(f"✅ Comparisons complete! Processed {total_pairs} pairs. Total cost: ${total_cost:.2f}")
+        status_placeholder.success(f"✅ Comparisons complete! Processed {iteration} iterations. Total cost: ${total_cost:.2f}")
+        
+        # Report blocked comparisons if any
+        if blocked_comparisons:
+            st.error(f"""
+            🚫 **Summary: {len(blocked_comparisons)} Comparisons Blocked by Safety Filters**
+            
+            The following cases triggered Gemini's content filters and need manual review:
+            """)
+            
+            # Create a summary table of blocked cases
+            blocked_cases_set = set()
+            for blocked in blocked_comparisons:
+                blocked_cases_set.add((blocked['case_a_id'], blocked['case_a']))
+                blocked_cases_set.add((blocked['case_b_id'], blocked['case_b']))
+            
+            st.write("**Affected Cases:**")
+            for case_id, case_name in sorted(blocked_cases_set):
+                st.write(f"- Case ID {case_id}: {case_name}")
+            
+            st.write("""
+            **Recommended Actions:**
+            1. Review the listed cases for sensitive content
+            2. Consider excluding these cases from automated analysis
+            3. Or manually compare them with appropriate context
+            4. Check the Comparisons tab to see which comparisons were blocked
+            """)
         
     except Exception as e:
+        # Clear the comparisons running flag on error
+        st.session_state['comparisons_running'] = False
         st.error(f"Error during comparisons: {str(e)}")
 
 @st.cache_resource
 def initialize_experiment_tables():
     """Initialize database tables for experiment management (cached - runs only once)"""
+    
+    # Ultra-fast check if essential tables exist
+    try:
+        # Check just one essential table first
+        execute_sql("SELECT COUNT(*) FROM v2_sample_groups LIMIT 1", fetch=True)
+        # If we get here, assume all tables are initialized
+        return "Tables already exist"
+    except:
+        pass
+    
+    # Try a broader check for main tables
+    tables_exist = True
+    essential_tables = ['v2_cases', 'v2_experiments', 'v2_sample_groups']
+    
+    for table in essential_tables:
+        try:
+            execute_sql(f"SELECT 1 FROM {table} LIMIT 1", fetch=True)
+        except:
+            tables_exist = False
+            break
+    
+    if tables_exist:
+        return "Tables already initialized"
     
     # Cases table (v2) - Just store the cases and metadata
     from config import DB_TYPE
@@ -2054,8 +2858,6 @@ def initialize_experiment_tables():
                 legal_test_name TEXT,
                 legal_test_content TEXT,
                 extraction_rationale TEXT,
-                rule_like_score REAL,
-                confidence_score REAL,
                 validation_status TEXT DEFAULT 'pending',
                 validator_notes TEXT,
                 api_cost_usd REAL DEFAULT 0.0,
@@ -2074,8 +2876,6 @@ def initialize_experiment_tables():
                 legal_test_name TEXT,
                 legal_test_content TEXT,
                 extraction_rationale TEXT,
-                rule_like_score REAL,
-                confidence_score REAL,
                 validation_status TEXT DEFAULT 'pending',
                 validator_notes TEXT,
                 api_cost_usd REAL DEFAULT 0.0,
@@ -2096,7 +2896,6 @@ def initialize_experiment_tables():
                 extraction_id_2 INTEGER,
                 winner_id INTEGER,
                 comparison_rationale TEXT,
-                confidence_score REAL,
                 human_validated BOOLEAN DEFAULT FALSE,
                 api_cost_usd REAL DEFAULT 0.0,
                 comparison_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -2116,7 +2915,6 @@ def initialize_experiment_tables():
                 extraction_id_2 INTEGER,
                 winner_id INTEGER,
                 comparison_rationale TEXT,
-                confidence_score REAL,
                 human_validated BOOLEAN DEFAULT FALSE,
                 api_cost_usd REAL DEFAULT 0.0,
                 comparison_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -2158,7 +2956,9 @@ def initialize_experiment_tables():
             );
         ''')
     
-    # Experiment selected cases table (v2) - Cases chosen for experiments
+    # Legacy experiment selected cases table (v2) - DEPRECATED
+    # Experiments now use sample groups instead of global case selection
+    # Keeping table for backward compatibility with existing data
     if DB_TYPE == 'postgresql':
         execute_sql('''
             CREATE TABLE IF NOT EXISTS v2_experiment_selected_cases (
@@ -2223,24 +3023,189 @@ def initialize_experiment_tables():
     except:
         pass  # Column already exists
     
-    # Add indexes for performance (v2)
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_citation ON v2_cases (citation);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_year ON v2_cases (decision_year);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_status ON v2_experiments (status);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_experiment_id ON v2_experiment_runs (experiment_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_experiment_id ON v2_experiment_extractions (experiment_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_case_id ON v2_experiment_extractions (case_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_experiment_id ON v2_experiment_comparisons (experiment_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_results_experiment_id ON v2_experiment_results (experiment_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_selected_cases_case_id ON v2_experiment_selected_cases (case_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_case_id ON v2_bradley_terry_structure (case_id);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_block ON v2_bradley_terry_structure (block_number);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_role ON v2_bradley_terry_structure (case_role);')
+    # Create indexes efficiently in batches (most critical ones first)
+    critical_indexes = [
+        'CREATE INDEX IF NOT EXISTS idx_v2_cases_citation ON v2_cases (citation);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiments_status ON v2_experiments (status);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_sample_groups_name ON v2_sample_groups (group_name);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_sample_group_members_group_id ON v2_sample_group_members (group_id);'
+    ]
     
-    # Additional performance indexes
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_modified_date ON v2_experiments (modified_date DESC);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_date ON v2_experiment_runs (run_date);')
-    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_cases_case_length ON v2_cases (case_length) WHERE case_length IS NOT NULL;')
+    # Execute critical indexes first
+    for index_sql in critical_indexes:
+        try:
+            execute_sql(index_sql)
+        except:
+            pass  # Index might already exist
+    
+    # Other indexes (less critical, create without blocking)
+    other_indexes = [
+        'CREATE INDEX IF NOT EXISTS idx_v2_cases_year ON v2_cases (decision_year);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_experiment_id ON v2_experiment_runs (experiment_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_experiment_id ON v2_experiment_extractions (experiment_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_extractions_case_id ON v2_experiment_extractions (case_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_experiment_id ON v2_experiment_comparisons (experiment_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_results_experiment_id ON v2_experiment_results (experiment_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_selected_cases_case_id ON v2_experiment_selected_cases (case_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_case_id ON v2_bradley_terry_structure (case_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_block ON v2_bradley_terry_structure (block_number);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_bradley_terry_structure_role ON v2_bradley_terry_structure (case_role);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiments_modified_date ON v2_experiments (modified_date DESC);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_runs_date ON v2_experiment_runs (run_date);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_cases_case_length ON v2_cases (case_length) WHERE case_length IS NOT NULL;',
+        'CREATE INDEX IF NOT EXISTS idx_v2_sample_group_members_case_id ON v2_sample_group_members (case_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiments_sample_group_id ON v2_experiments (sample_group_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_active_sampling_state_experiment_id ON v2_active_sampling_state (experiment_id);',
+        'CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_iteration ON v2_experiment_comparisons (sampling_iteration);'
+    ]
+    
+    # Create other indexes (these can be slower)
+    for index_sql in other_indexes:
+        try:
+            execute_sql(index_sql)
+        except:
+            pass  # Index might already exist or fail - not critical for app to start
+    
+    # Sample groups tables (v2.1)
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_sample_groups (
+                group_id SERIAL PRIMARY KEY,
+                group_name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT DEFAULT 'researcher'
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_sample_groups (
+                group_id INTEGER PRIMARY KEY,
+                group_name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT DEFAULT 'researcher'
+            );
+        ''')
+    
+    # Sample group members table
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_sample_group_members (
+                member_id SERIAL PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                case_id INTEGER NOT NULL,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                added_by TEXT DEFAULT 'researcher',
+                FOREIGN KEY (group_id) REFERENCES v2_sample_groups (group_id) ON DELETE CASCADE,
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(group_id, case_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_sample_group_members (
+                member_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                case_id INTEGER NOT NULL,
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                added_by TEXT DEFAULT 'researcher',
+                FOREIGN KEY (group_id) REFERENCES v2_sample_groups (group_id) ON DELETE CASCADE,
+                FOREIGN KEY (case_id) REFERENCES v2_cases (case_id),
+                UNIQUE(group_id, case_id)
+            );
+        ''')
+    
+    # Active sampling state table
+    if DB_TYPE == 'postgresql':
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_active_sampling_state (
+                state_id SERIAL PRIMARY KEY,
+                experiment_id INTEGER NOT NULL,
+                comparison_matrix TEXT,
+                current_scores TEXT,
+                spearman_correlation REAL,
+                iteration_number INTEGER DEFAULT 0,
+                convergence_reached BOOLEAN DEFAULT FALSE,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                UNIQUE(experiment_id)
+            );
+        ''')
+    else:
+        execute_sql('''
+            CREATE TABLE IF NOT EXISTS v2_active_sampling_state (
+                state_id INTEGER PRIMARY KEY,
+                experiment_id INTEGER NOT NULL,
+                comparison_matrix TEXT,
+                current_scores TEXT,
+                spearman_correlation REAL,
+                iteration_number INTEGER DEFAULT 0,
+                convergence_reached BOOLEAN DEFAULT FALSE,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (experiment_id) REFERENCES v2_experiments (experiment_id),
+                UNIQUE(experiment_id)
+            );
+        ''')
+    
+    # Add new columns to existing tables
+    try:
+        execute_sql('ALTER TABLE v2_experiments ADD COLUMN sample_group_id INTEGER;')
+    except:
+        pass  # Column already exists
+    
+    try:
+        execute_sql('ALTER TABLE v2_experiments ADD FOREIGN KEY (sample_group_id) REFERENCES v2_sample_groups (group_id);')
+    except:
+        pass  # Constraint already exists
+        
+    try:
+        execute_sql('ALTER TABLE v2_experiment_comparisons ADD COLUMN sampling_iteration INTEGER;')
+    except:
+        pass  # Column already exists
+        
+    try:
+        execute_sql('ALTER TABLE v2_experiment_comparisons ADD COLUMN information_gain REAL;')
+    except:
+        pass  # Column already exists
+    
+    # Sample groups indexes
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_sample_groups_name ON v2_sample_groups (group_name);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_sample_group_members_group_id ON v2_sample_group_members (group_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_sample_group_members_case_id ON v2_sample_group_members (case_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiments_sample_group_id ON v2_experiments (sample_group_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_active_sampling_state_experiment_id ON v2_active_sampling_state (experiment_id);')
+    execute_sql('CREATE INDEX IF NOT EXISTS idx_v2_experiment_comparisons_iteration ON v2_experiment_comparisons (sampling_iteration);')
+    
+    # Apply foreign key constraint fixes for PostgreSQL to prevent deletion errors
+    if DB_TYPE == 'postgresql':
+        try:
+            # Fix foreign key constraints to add CASCADE deletes
+            execute_sql("ALTER TABLE v2_experiment_comparisons DROP CONSTRAINT IF EXISTS v2_experiment_comparisons_extraction_id_1_fkey")
+            execute_sql("ALTER TABLE v2_experiment_comparisons DROP CONSTRAINT IF EXISTS v2_experiment_comparisons_extraction_id_2_fkey") 
+            execute_sql("ALTER TABLE v2_experiment_comparisons DROP CONSTRAINT IF EXISTS v2_experiment_comparisons_winner_id_fkey")
+            
+            # Recreate with CASCADE delete
+            execute_sql("""
+                ALTER TABLE v2_experiment_comparisons 
+                ADD CONSTRAINT v2_experiment_comparisons_extraction_id_1_fkey 
+                FOREIGN KEY (extraction_id_1) REFERENCES v2_experiment_extractions (extraction_id) ON DELETE CASCADE
+            """)
+            execute_sql("""
+                ALTER TABLE v2_experiment_comparisons 
+                ADD CONSTRAINT v2_experiment_comparisons_extraction_id_2_fkey 
+                FOREIGN KEY (extraction_id_2) REFERENCES v2_experiment_extractions (extraction_id) ON DELETE CASCADE
+            """)
+            execute_sql("""
+                ALTER TABLE v2_experiment_comparisons 
+                ADD CONSTRAINT v2_experiment_comparisons_winner_id_fkey 
+                FOREIGN KEY (winner_id) REFERENCES v2_experiment_extractions (extraction_id) ON DELETE CASCADE
+            """)
+        except Exception as e:
+            # If constraints already exist or other error, continue (non-critical)
+            pass
+    
+    return "Database tables initialized successfully with foreign key fixes"
 
 # Cache experiment overview data for 60 seconds
 @st.cache_data(ttl=60)
@@ -2266,39 +3231,22 @@ def get_experiments_overview_data():
 # Cache case statistics for 120 seconds (changes less frequently)
 @st.cache_data(ttl=120)
 def get_case_statistics():
-    """Get case count and length statistics"""
+    """Get case count and length statistics (simplified for sample group system)"""
     stats = {}
     
-    # Get counts
-    selected_cases_count = execute_sql("SELECT COUNT(*) FROM v2_experiment_selected_cases", fetch=True)[0][0]
-    total_cases_count = execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0]
+    # Get total case count
+    total_cases_count = int(execute_sql("SELECT COUNT(*) FROM v2_cases", fetch=True)[0][0])
     
-    # Get case length statistics with single query
-    if selected_cases_count > 0:
-        case_stats = execute_sql("""
-            SELECT 
-                AVG(CASE WHEN s.case_id IS NOT NULL THEN c.case_length END) as avg_selected_length,
-                AVG(c.case_length) as avg_all_length
-            FROM v2_cases c 
-            LEFT JOIN v2_experiment_selected_cases s ON c.case_id = s.case_id
-            WHERE c.case_length IS NOT NULL
-        """, fetch=True)
-        
-        if case_stats and case_stats[0]:
-            stats['avg_selected_case_length'] = float(case_stats[0][0]) if case_stats[0][0] else 52646.0
-            stats['avg_all_case_length'] = float(case_stats[0][1]) if case_stats[0][1] else 52646.0
-        else:
-            stats['avg_selected_case_length'] = 52646.0
-            stats['avg_all_case_length'] = 52646.0
-    else:
-        # If no selected cases, get overall average
-        all_avg = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
-        avg_length = float(all_avg[0][0]) if all_avg and all_avg[0][0] else 52646.0
-        stats['avg_selected_case_length'] = avg_length  
-        stats['avg_all_case_length'] = avg_length
+    # Get overall average case length
+    all_avg = execute_sql("SELECT AVG(case_length) FROM v2_cases WHERE case_length IS NOT NULL", fetch=True)
+    avg_length = float(all_avg[0][0]) if all_avg and all_avg[0][0] else 52646.0
     
-    stats['selected_cases_count'] = selected_cases_count
-    stats['total_cases_count'] = total_cases_count
+    stats['total_cases_count'] = int(total_cases_count)
+    stats['avg_all_case_length'] = avg_length
+    
+    # Legacy fields for backward compatibility (will be removed)
+    stats['selected_cases_count'] = 0  # Deprecated - use sample groups instead
+    stats['avg_selected_case_length'] = avg_length  # Deprecated - use sample groups instead
     
     return stats
 
@@ -2443,34 +3391,14 @@ def show_experiment_overview():
     pd = _get_pandas()
     df = pd.DataFrame(experiments_data, columns=columns)
     
-    # Get cached case statistics
+    # Get cached case statistics for overall database info
     try:
         stats = get_case_statistics()
-        selected_cases_count = stats['selected_cases_count']
         total_cases_count = stats['total_cases_count']
-        avg_selected_case_length = stats['avg_selected_case_length']
         avg_all_case_length = stats['avg_all_case_length']
-        
     except Exception as e:
-        selected_cases_count = 0
         total_cases_count = 0
-        avg_selected_case_length = 52646.0
         avg_all_case_length = 52646.0
-    
-    # Calculate shared parameters once using cached function
-    n_cases = selected_cases_count
-    # Use default strategy for overview - individual cards will recalculate with specific strategy
-    cost_params = get_cost_calculation_params(n_cases, avg_selected_case_length, 'single_test')
-    
-    required_comparisons = cost_params['required_comparisons']
-    block_size = cost_params['block_size']
-    core_cases_per_block = cost_params['core_cases_per_block']
-    comparisons_per_block = cost_params['comparisons_per_block']
-    
-    # Skip if no cases selected
-    if n_cases == 0:
-        st.info("No cases selected for experiments yet. Select cases first to see experiment details.")
-        return
     
     # Display experiment cards in responsive grid
     st.write(f"**{len(df)} experiments found**")
@@ -2486,87 +3414,126 @@ def show_experiment_overview():
         for idx, (_, exp) in enumerate(row.iterrows()):
             if idx < len(cols):  # Safety check
                 with cols[idx]:
-                    show_experiment_card(exp, n_cases, required_comparisons, 
-                                        avg_selected_case_length, avg_all_case_length, 
-                                        total_cases_count, cost_params)
+                    show_experiment_card(exp, total_cases_count, avg_all_case_length)
 
-def show_experiment_card(exp, n_cases, required_comparisons, avg_selected_case_length, 
-                        avg_all_case_length, total_cases_count, cost_params):
-    """Display a single experiment card"""
-            
-    # Get model pricing (prices are per million tokens)
-    model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
+def show_experiment_card(exp, total_cases_count, avg_all_case_length):
+    """Display a single experiment card with proper sample group support"""
     
-    # Recalculate cost parameters for this specific experiment's strategy
-    exp_cost_params = get_cost_calculation_params(n_cases, avg_selected_case_length, exp['extraction_strategy'])
+    # Get experiment details including sample group info
+    exp_id = int(exp['experiment_id'])
+    exp_detail = _get_experiment_detail(exp_id)
     
-    extraction_input_tokens = exp_cost_params['extraction_input_tokens']
-    extracted_test_tokens = exp_cost_params['extracted_test_tokens']
-    comparison_input_tokens = exp_cost_params['comparison_input_tokens']
-    comparison_output_tokens = exp_cost_params['comparison_output_tokens']
+    if not exp_detail:
+        st.error(f"Cannot load experiment #{exp_id}")
+        return
     
-    # Calculate per-case costs
-    extraction_cost_per_case = (extraction_input_tokens / 1_000_000) * model_pricing['input'] + (extracted_test_tokens / 1_000_000) * model_pricing['output']
-    comparison_cost_per_pair = (comparison_input_tokens / 1_000_000) * model_pricing['input'] + (comparison_output_tokens / 1_000_000) * model_pricing['output']
-    
-    # Calculate estimates
-    remaining_extractions = max(0, n_cases - int(exp['total_tests'] or 0))
-    remaining_comparisons = max(0, required_comparisons - int(exp['total_comparisons'] or 0))
-    
-    extraction_cost_estimate = remaining_extractions * extraction_cost_per_case
-    
-    # Calculate total sample cost based on strategy
-    if exp['extraction_strategy'] == 'full_text_comparison':
-        # No extraction cost for full text comparison
-        sample_total_cost = required_comparisons * comparison_cost_per_pair
+    # Calculate case count based on sample group or legacy system
+    sample_group_id = exp_detail.get('sample_group_id')
+    if sample_group_id:
+        # New system: Get case count from sample group
+        from utils.sample_group_management import get_sample_groups
+        sample_groups_df = get_sample_groups()
+        matching_group = sample_groups_df[sample_groups_df['group_id'] == sample_group_id]
+        
+        if not matching_group.empty:
+            n_cases = int(matching_group.iloc[0]['member_count'])
+            # Use average length from sample group if available, otherwise use global average
+            avg_case_length = avg_all_case_length  # Could enhance this with sample group specific average
+        else:
+            n_cases = 0
+            avg_case_length = avg_all_case_length
     else:
-        # Extraction + comparison costs
-        sample_total_cost = (n_cases * extraction_cost_per_case) + (required_comparisons * comparison_cost_per_pair)
+        # No sample group: Cannot calculate estimates without sample group
+        n_cases = 0
+        avg_case_length = avg_all_case_length
+    
+    # Calculate cost estimates using the experiment's specific parameters
+    if n_cases == 0:
+        required_comparisons = 0
+        sample_total_cost = 0.0
+    else:
+        required_comparisons = calculate_bradley_terry_comparisons(n_cases)
+        
+        # Get model pricing (prices are per million tokens)
+        model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
+        
+        # Calculate cost parameters for this specific experiment
+        exp_cost_params = get_cost_calculation_params(n_cases, avg_case_length, exp['extraction_strategy'])
+        
+        extraction_input_tokens = exp_cost_params['extraction_input_tokens']
+        extracted_test_tokens = exp_cost_params['extracted_test_tokens']
+        comparison_input_tokens = exp_cost_params['comparison_input_tokens']
+        comparison_output_tokens = exp_cost_params['comparison_output_tokens']
+        
+        # Calculate per-case costs
+        extraction_cost_per_case = (extraction_input_tokens / 1_000_000) * model_pricing['input'] + (extracted_test_tokens / 1_000_000) * model_pricing['output']
+        comparison_cost_per_pair = (comparison_input_tokens / 1_000_000) * model_pricing['input'] + (comparison_output_tokens / 1_000_000) * model_pricing['output']
+        
+        # Calculate total sample cost based on strategy
+        if exp['extraction_strategy'] == 'full_text_comparison':
+            # No extraction cost for full text comparison
+            sample_total_cost = required_comparisons * comparison_cost_per_pair
+        else:
+            # Extraction + comparison costs
+            sample_total_cost = (n_cases * extraction_cost_per_case) + (required_comparisons * comparison_cost_per_pair)
     
     # Status and progress
     status_colors = {
         'draft': '🟡 Draft',
-        'active': '🟢 Active', 
-        'completed': '🔵 Completed',
+        'in_progress': '🟠 In Progress',
+        'complete': '🟢 Complete',
         'archived': '⚫ Archived'
     }
     
-    # Use Streamlit's built-in container with visual separation
-    with st.container(border=True):
-        # Card content with smaller title
-        st.markdown(f"### 🧪 #{exp['experiment_id']} {exp['name']}")
-        st.markdown(f"**{status_colors.get(exp['status'], exp['status'])}**")
+    # Use Streamlit's built-in container with visual separation and fixed height
+    with st.container(border=True, height=380):  # Fixed height for consistent card sizes
+        # Card header with consistent spacing
+        st.markdown(f"✅ **#{int(exp['experiment_id'])} {exp['name'][:50]}{'...' if len(exp['name']) > 50 else ''}**")
+        st.markdown(f"{status_colors.get(exp['status'], exp['status'])}")
         
         # Key metrics in columns
         col1, col2 = st.columns(2)
         
         with col1:
             st.metric("Tests", f"{int(exp['total_tests'] or 0)}/{n_cases}")
-            st.metric("Comparisons", f"{int(exp['total_comparisons'] or 0)}/{required_comparisons}")
+            st.metric("Spent", f"${exp['total_cost'] or 0:.2f}")
         
         with col2:
-            st.metric("Spent", f"${exp['total_cost'] or 0:.2f}")
+            st.metric("Comparisons", f"{int(exp['total_comparisons'] or 0)}/{required_comparisons}")
             st.metric("Sample Est.", f"${sample_total_cost:.2f}")
         
-        # Description (truncated)
-        description = exp['description'] or 'No description'
-        if len(description) > 60:
-            description = description[:60] + "..."
+        # Model and strategy info (compact)
         st.caption(f"**Model:** {exp['ai_model']} | **Strategy:** {exp['extraction_strategy']}")
+        
+        # Description (truncated for consistent layout)
+        description = exp['description'] or 'No description'
+        if len(description) > 50:
+            description = description[:50] + "..."
         st.caption(f"**Description:** {description}")
         
-        # Actions - only Details and Configure buttons
+        # Spacer to push buttons to bottom
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Actions - Details and Configure buttons
         col1, col2 = st.columns(2)
         
         with col1:
             if st.button("📊 Details", key=f"details_{exp['experiment_id']}", use_container_width=True):
                 st.session_state.selected_page = "Experiment Detail"
-                st.session_state.selected_experiment = exp['experiment_id']
+                st.session_state.selected_experiment = int(exp['experiment_id'])
                 st.rerun()
         
         with col2:
-            if st.button("⚙️ Configure", key=f"config_{exp['experiment_id']}", use_container_width=True):
-                st.session_state.editing_experiment = exp['experiment_id']
+            # Disable Configure button for experiments that are in progress or complete
+            is_configurable = exp['status'] in ['draft']
+            
+            if st.button("⚙️ Configure", 
+                        key=f"config_{exp['experiment_id']}", 
+                        use_container_width=True,
+                        disabled=not is_configurable,
+                        help="Configuration is only available for draft experiments"):
+                st.session_state.editing_experiment = int(exp['experiment_id'])
+                st.session_state.selected_page = "Create Experiment"
                 st.rerun()
 
 def show_experiment_configuration():
@@ -2592,7 +3559,7 @@ def show_experiment_configuration():
                            'temperature', 'top_p', 'top_k', 'max_output_tokens', 
                            'extraction_strategy', 'extraction_prompt', 'comparison_prompt',
                            'system_instruction', 'cost_limit_usd', 'created_date',
-                           'modified_date', 'created_by'], exp_data[0]))
+                           'modified_date', 'created_by', 'sample_group_id'], exp_data[0]))
             
             # Pre-populate session state with existing experiment data
             if 'experiment_config' not in st.session_state:
@@ -2616,7 +3583,8 @@ def show_experiment_configuration():
             'extraction_prompt': '',
             'comparison_prompt': '',
             'system_instruction': 'You are a helpful assistant that helps legal researchers analyze legal texts.',
-            'cost_limit_usd': 100.0
+            'cost_limit_usd': 100.0,
+            'sample_group_id': None
         }
         
         # Initialize session state with defaults
@@ -2685,6 +3653,58 @@ def show_basic_info_form(exp, editing_id):
                 help="Maximum response length. 1000-2000 = summaries, 4000-8192 = detailed analysis, 8192 = comprehensive extraction."
             )
         
+        # Sample Group Selection
+        st.subheader("📋 Sample Group Selection")
+        
+        # Get available sample groups
+        from utils.sample_group_management import get_sample_groups
+        sample_groups_df = get_sample_groups()
+        
+        if sample_groups_df.empty:
+            st.warning("⚠️ No sample groups available. Please create sample groups first using the Case Management page.")
+            st.info("💡 **Tip**: Use the Case Management page to create sample groups with your desired cases.")
+            sample_group_id = None
+        else:
+            # Create options for selectbox
+            group_options = ["None (No sample group selected)"] + [
+                f"{row['group_name']} ({row['member_count']} cases)" 
+                for _, row in sample_groups_df.iterrows()
+            ]
+            
+            # Find current selection index
+            current_sample_group_id = exp.get('sample_group_id')
+            if current_sample_group_id:
+                # Find the row with matching group_id
+                matching_row = sample_groups_df[sample_groups_df['group_id'] == current_sample_group_id]
+                if not matching_row.empty:
+                    current_index = list(sample_groups_df.index).index(matching_row.index[0]) + 1
+                else:
+                    current_index = 0
+            else:
+                current_index = 0
+            
+            selected_group = st.selectbox(
+                "Sample Group",
+                options=group_options,
+                index=current_index,
+                help="Select a sample group to use for this experiment. The experiment will only process cases from this group."
+            )
+            
+            # Extract sample_group_id from selection
+            if selected_group == "None (No sample group selected)":
+                sample_group_id = None
+                st.info("💡 **No sample group selected**: This experiment will use the legacy case selection system.")
+            else:
+                # Find the corresponding group_id
+                selected_index = group_options.index(selected_group) - 1
+                sample_group_id = int(sample_groups_df.iloc[selected_index]['group_id'])
+                
+                # Show group details
+                selected_group_info = sample_groups_df.iloc[selected_index]
+                st.success(f"✅ **Selected**: {selected_group_info['group_name']} with {selected_group_info['member_count']} cases")
+                if selected_group_info['description']:
+                    st.caption(f"📝 **Description**: {selected_group_info['description']}")
+        
         # Extraction Strategy Selection
         st.subheader("📋 Extraction Strategy")
         extraction_strategy = st.selectbox(
@@ -2713,7 +3733,8 @@ def show_basic_info_form(exp, editing_id):
                     'top_p': top_p,
                     'top_k': top_k,
                     'max_output_tokens': max_tokens,
-                    'extraction_strategy': extraction_strategy
+                    'extraction_strategy': extraction_strategy,
+                    'sample_group_id': sample_group_id
                 })
                 st.session_state.config_step = 2
                 st.rerun()
@@ -2819,7 +3840,8 @@ def show_prompts_config_form(exp, editing_id):
                                      final_config['temperature'], final_config['top_p'], final_config['top_k'], 
                                      final_config['max_output_tokens'], final_config['extraction_strategy'], 
                                      final_config['extraction_prompt'], final_config['comparison_prompt'], 
-                                     final_config['system_instruction'], final_config['cost_limit_usd'])
+                                     final_config['system_instruction'], final_config['cost_limit_usd'], 
+                                     final_config.get('sample_group_id'))
                     
                     if saved_experiment_id:
                         st.success("Experiment saved successfully!")
@@ -2852,7 +3874,8 @@ def show_prompts_config_form(exp, editing_id):
                                  final_config['temperature'], final_config['top_p'], final_config['top_k'], 
                                  final_config['max_output_tokens'], final_config['extraction_strategy'], 
                                  final_config['extraction_prompt'], final_config['comparison_prompt'], 
-                                 final_config['system_instruction'], final_config['cost_limit_usd'])
+                                 final_config['system_instruction'], final_config['cost_limit_usd'], 
+                                 final_config.get('sample_group_id'))
                 
                 if cloned_experiment_id:
                     st.success(f"Experiment cloned as '{new_name}'!")
@@ -2869,9 +3892,12 @@ def show_prompts_config_form(exp, editing_id):
 
 def save_experiment(experiment_id, name, description, researcher_name, status, ai_model, temperature, top_p, 
                    top_k, max_tokens, extraction_strategy, extraction_prompt, 
-                   comparison_prompt, system_instruction, cost_limit):
+                   comparison_prompt, system_instruction, cost_limit, sample_group_id=None):
     """Save experiment configuration to database"""
     try:
+        # Convert numpy types to Python native types for PostgreSQL compatibility
+        if sample_group_id is not None:
+            sample_group_id = int(sample_group_id)
         if experiment_id:
             # Update existing experiment
             execute_sql("""
@@ -2879,21 +3905,21 @@ def save_experiment(experiment_id, name, description, researcher_name, status, a
                     name = ?, description = ?, researcher_name = ?, ai_model = ?, temperature = ?,
                     top_p = ?, top_k = ?, max_output_tokens = ?, extraction_strategy = ?,
                     extraction_prompt = ?, comparison_prompt = ?, system_instruction = ?,
-                    cost_limit_usd = ?, modified_date = CURRENT_TIMESTAMP
+                    cost_limit_usd = ?, sample_group_id = ?, modified_date = CURRENT_TIMESTAMP
                 WHERE experiment_id = ?
             """, (name, description, researcher_name, ai_model, temperature, top_p, top_k, max_tokens,
                   extraction_strategy, extraction_prompt, comparison_prompt, system_instruction,
-                  cost_limit, experiment_id))
+                  cost_limit, sample_group_id, experiment_id))
             return experiment_id
         else:
             # Create new experiment
             execute_sql("""
                 INSERT INTO v2_experiments (name, description, researcher_name, status, ai_model, temperature, top_p,
                                        top_k, max_output_tokens, extraction_strategy, extraction_prompt,
-                                       comparison_prompt, system_instruction, cost_limit_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       comparison_prompt, system_instruction, cost_limit_usd, sample_group_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (name, description, researcher_name, 'draft', ai_model, temperature, top_p, top_k, max_tokens,
-                  extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit))
+                  extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit, sample_group_id))
             
             # Get the ID of the newly created experiment
             new_experiment_id = execute_sql("""
@@ -2918,9 +3944,11 @@ def save_experiment(experiment_id, name, description, researcher_name, status, a
         return None
 
 def show_case_management():
-    """Show experiment case selection interface"""
-    st.header("📚 Experiment Case Selection")
-    st.markdown("*Select specific cases from the database to include in all experiments*")
+    """Deprecated: Use show_case_management_v2() with sample groups instead"""
+    st.header("📚 Legacy Case Management (Deprecated)")
+    st.error("⚠️ This legacy case management system has been deprecated. Please use the new Sample Groups system.")
+    st.info("Navigate to the 'Case Management (Sample Groups)' page to create and manage sample groups for your experiments.")
+    return
     
     # Get database counts
     total_cases, selected_cases, tests_count, comparisons_count, validated_count = get_database_counts()
@@ -3485,7 +4513,7 @@ def show_sidebar_navigation():
     if is_active:
         button_kwargs["type"] = "secondary"
     
-    if st.sidebar.button("📚 View/Add Cases to Experiments", **button_kwargs):
+    if st.sidebar.button("📚 Case Management (Sample Groups)", **button_kwargs):
         st.session_state.selected_page = "Cases"
         st.session_state.selected_experiment = None
         st.rerun()
@@ -3562,7 +4590,7 @@ def show_sidebar_navigation():
 def _get_experiment_detail(experiment_id):
     """Get experiment details from database"""
     exp_data = execute_sql(
-        "SELECT experiment_id, name, description, researcher_name, status, ai_model, temperature, top_p, top_k, max_output_tokens, extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit_usd, created_date, modified_date, created_by FROM v2_experiments WHERE experiment_id = ?", 
+        "SELECT experiment_id, name, description, researcher_name, status, ai_model, temperature, top_p, top_k, max_output_tokens, extraction_strategy, extraction_prompt, comparison_prompt, system_instruction, cost_limit_usd, created_date, modified_date, created_by, sample_group_id FROM v2_experiments WHERE experiment_id = ?", 
         (experiment_id,), 
         fetch=True
     )
@@ -3590,7 +4618,8 @@ def _get_experiment_detail(experiment_id):
         'cost_limit_usd': float(row[14]) if row[14] is not None else 100.0,
         'created_date': row[15],
         'modified_date': row[16],
-        'created_by': row[17]
+        'created_by': row[17],
+        'sample_group_id': row[18]
     }
 
 def show_experiment_detail(experiment_id):
@@ -3627,8 +4656,22 @@ def show_experiment_detail(experiment_id):
             avg_selected_case_length = 52646.0
             avg_all_case_length = 52646.0
         
-        # Calculate comprehensive cost data
-        n_cases = selected_cases_count
+        # Calculate comprehensive cost data based on sample group
+        sample_group_id = exp.get('sample_group_id')
+        if sample_group_id:
+            # Get case count from sample group
+            from utils.sample_group_management import get_sample_groups
+            sample_groups_df = get_sample_groups()
+            matching_group = sample_groups_df[sample_groups_df['group_id'] == sample_group_id]
+            
+            if not matching_group.empty:
+                n_cases = int(matching_group.iloc[0]['member_count'])
+            else:
+                n_cases = 0
+        else:
+            # No sample group assigned - cannot calculate estimates
+            n_cases = 0
+            
         required_comparisons = calculate_bradley_terry_comparisons(n_cases)
         
         # Bradley-Terry parameters
@@ -3696,6 +4739,29 @@ def show_experiment_detail(experiment_id):
                 st.write(f"**Created:** {created_str}")
                 st.write(f"**Modified:** {modified_str}")
                 
+                # Sample Group Information
+                st.subheader("Sample Group")
+                sample_group_id = exp.get('sample_group_id')
+                if sample_group_id:
+                    # Get sample group details
+                    from utils.sample_group_management import get_sample_groups
+                    sample_groups_df = get_sample_groups()
+                    matching_group = sample_groups_df[sample_groups_df['group_id'] == sample_group_id]
+                    
+                    if not matching_group.empty:
+                        group_info = matching_group.iloc[0]
+                        st.write(f"**Group:** {group_info['group_name']}")
+                        st.write(f"**Cases:** {int(group_info['member_count'])}")
+                        if group_info['description']:
+                            st.write(f"**Description:** {group_info['description']}")
+                        n_cases = int(group_info['member_count'])  # Update case count from sample group
+                    else:
+                        st.warning("⚠️ Sample group not found (may have been deleted)")
+                        n_cases = 0
+                else:
+                    st.write("**Group:** None (no sample group assigned)")
+                    st.warning("⚠️ This experiment doesn't have a sample group. Please configure a sample group to proceed.")
+                
                 st.subheader("Current Progress")
                 st.metric("Tests Extracted", f"{total_tests}/{n_cases}")
                 st.metric("Comparisons Made", f"{total_comparisons}/{required_comparisons}")
@@ -3720,15 +4786,23 @@ def show_experiment_detail(experiment_id):
                 st.write(f"**Cost Limit:** ${exp['cost_limit_usd']}")
                 
                 # Show comparison strategy
-                if n_cases <= block_size:
-                    comparison_strategy = "Full pairwise"
-                else:
-                    blocks_needed = (n_cases + core_cases_per_block - 1) // core_cases_per_block
-                    comparison_strategy = f"Bradley-Terry ({blocks_needed} blocks)"
-                
                 st.subheader("Comparison Strategy")
-                st.write(f"**Method:** {comparison_strategy}")
-                st.write(f"**Required Comparisons:** {required_comparisons:,}")
+                if sample_group_id:
+                    # New ASAP active sampling approach
+                    comparison_strategy = "ASAP Active Sampling"
+                    st.write(f"**Method:** {comparison_strategy}")
+                    st.write(f"**Estimated Comparisons:** {required_comparisons:,} (adaptive)")
+                    st.write(f"**Convergence:** Spearman correlation > 0.99")
+                else:
+                    # Legacy block-based approach
+                    if n_cases <= block_size:
+                        comparison_strategy = "Full pairwise"
+                    else:
+                        blocks_needed = (n_cases + core_cases_per_block - 1) // core_cases_per_block
+                        comparison_strategy = f"Bradley-Terry ({blocks_needed} blocks)"
+                    
+                    st.write(f"**Method:** {comparison_strategy}")
+                    st.write(f"**Required Comparisons:** {required_comparisons:,}")
             
             # Add full prompts display
             st.subheader("🤖 AI Prompts & Configuration")
@@ -3783,6 +4857,12 @@ def show_experiment_detail(experiment_id):
         
         with tab2:
             st.subheader("💰 Comprehensive Cost Analysis")
+            
+            # Show information about case management system
+            if sample_group_id:
+                st.info("✨ **Using Sample Groups**: This experiment uses the new sample group system with ASAP active sampling for efficient comparisons.")
+            else:
+                st.info("⚠️ **Legacy System**: This experiment uses the legacy case selection system. Consider migrating to sample groups for better efficiency.")
             
             # Get model pricing
             model_pricing = GEMINI_MODELS.get(exp['ai_model'], {'input': 0.30, 'output': 2.50})
@@ -4040,8 +5120,6 @@ def show_experiment_detail(experiment_id):
                     ee.extraction_rationale,
                     ee.test_passages,
                     ee.test_novelty,
-                    ee.rule_like_score,
-                    ee.confidence_score,
                     ee.validation_status,
                     c.decision_url
                 FROM v2_experiment_extractions ee
@@ -4058,8 +5136,7 @@ def show_experiment_detail(experiment_id):
                 df = pd.DataFrame(extractions, columns=[
                     'extraction_id', 'case_name', 'citation', 'legal_test_name', 
                     'legal_test_content', 'extraction_rationale', 'test_passages', 
-                    'test_novelty', 'rule_like_score', 'confidence_score', 
-                    'validation_status', 'decision_url'
+                    'test_novelty', 'validation_status', 'decision_url'
                 ])
                 
                 # Add search, filter, and sort controls
@@ -4098,7 +5175,7 @@ def show_experiment_detail(experiment_id):
                 with col4:
                     sort_by = st.selectbox(
                         "📊 Sort by",
-                        ["Case Name", "Rule-like Score", "Confidence Score", "Status"],
+                        ["Case Name", "Status"],
                         key="extraction_sort_by"
                     )
                 
@@ -4127,18 +5204,12 @@ def show_experiment_detail(experiment_id):
                 # Apply sorting
                 sort_column_map = {
                     "Case Name": "case_name",
-                    "Rule-like Score": "rule_like_score", 
-                    "Confidence Score": "confidence_score",
                     "Status": "validation_status"
                 }
                 sort_column = sort_column_map[sort_by]
                 ascending = sort_order == "Ascending"
                 
-                # Handle NaN values in sorting
-                if sort_column in ["rule_like_score", "confidence_score"]:
-                    filtered_df = filtered_df.sort_values(sort_column, ascending=ascending, na_position='last')
-                else:
-                    filtered_df = filtered_df.sort_values(sort_column, ascending=ascending)
+                filtered_df = filtered_df.sort_values(sort_column, ascending=ascending)
                 
                 # Display results summary
                 st.markdown("---")
@@ -4147,15 +5218,14 @@ def show_experiment_detail(experiment_id):
                     st.write(f"**Showing {len(filtered_df)} of {len(df)} extractions**")
                 with col_summary2:
                     if len(filtered_df) > 0:
-                        avg_rule_score = filtered_df['rule_like_score'].mean()
-                        st.write(f"**Average Rule-like Score:** {avg_rule_score:.2f}" if not pd.isna(avg_rule_score) else "**Average Rule-like Score:** N/A")
+                        validated_count = len(filtered_df[filtered_df['validation_status'] == 'accurate'])
+                        st.write(f"**Validated Extractions:** {validated_count}")
                 
                 # Create display with filtered results
                 for idx, row in filtered_df.iterrows():
                     # Create enhanced expander title with key info
-                    rule_score_text = f" | Rule-like: {row['rule_like_score']:.2f}" if row['rule_like_score'] else ""
                     status_text = f" | {row['validation_status']}" if row['validation_status'] else ""
-                    expander_title = f"**{row['case_name']}** ({row['citation']}){rule_score_text}{status_text}"
+                    expander_title = f"**{row['case_name']}** ({row['citation']}){status_text}"
                     
                     with st.expander(expander_title, expanded=False):
                         col1, col2 = st.columns([2, 1])
@@ -4171,12 +5241,9 @@ def show_experiment_detail(experiment_id):
                             st.write("**Test Location:**")
                             st.write(row['test_passages'] if row['test_passages'] else "Not available")
                             
+                        with col2:
                             st.write("**Test Novelty:**")
                             st.write(row['test_novelty'] if row['test_novelty'] else "Not available")
-                            
-                        with col2:
-                            st.metric("Rule-like Score", f"{row['rule_like_score']:.2f}" if row['rule_like_score'] else "N/A")
-                            st.metric("Confidence", f"{row['confidence_score']:.2f}" if row['confidence_score'] else "N/A")
                             
                             # Status with color coding
                             status = row['validation_status']
@@ -4210,7 +5277,6 @@ def show_experiment_detail(experiment_id):
                     ee2.legal_test_content as test_b,
                     winner_case.case_name as winner_case_name,
                     ec.comparison_rationale,
-                    ec.confidence_score,
                     ec.human_validated,
                     ec.comparison_date,
                     ec.winner_id,
@@ -4237,7 +5303,7 @@ def show_experiment_detail(experiment_id):
                 no_winner = 0
                 
                 for idx, comp in enumerate(comparisons):
-                    comparison_id, case_a_name, case_b_name, case_a_citation, case_b_citation, test_a, test_b, winner_case_name, comparison_rationale, confidence_score, human_validated, comparison_date, winner_id, extraction_id_1, extraction_id_2 = comp
+                    comparison_id, case_a_name, case_b_name, case_a_citation, case_b_citation, test_a, test_b, winner_case_name, comparison_rationale, human_validated, comparison_date, winner_id, extraction_id_1, extraction_id_2 = comp
                     
                     # Format the date
                     if comparison_date:
@@ -4274,7 +5340,6 @@ def show_experiment_detail(experiment_id):
                         'winner_text': winner_text,
                         'winner_label': winner_label,
                         'comparison_rationale': comparison_rationale,
-                        'confidence_score': confidence_score,
                         'human_validated': human_validated,
                         'formatted_date': formatted_date,
                         'comparison_date': comparison_date
@@ -4304,7 +5369,7 @@ def show_experiment_detail(experiment_id):
                 )
                 
                 # Apply filters and sorting
-                filtered_comparisons = processed_comparisons.copy()
+                filtered_comparisons = list(processed_comparisons)
                 
                 # Apply search filter
                 if search_term:
@@ -4499,6 +5564,8 @@ def show_experiment_detail(experiment_id):
                         disabled=not confirm_delete_extractions,
                         use_container_width=True
                     ):
+                        # Delete comparisons first to avoid foreign key constraint violations
+                        execute_sql("DELETE FROM v2_experiment_comparisons WHERE experiment_id = ?", (experiment_id,))
                         execute_sql("DELETE FROM v2_experiment_extractions WHERE experiment_id = ?", (experiment_id,))
                         
                         # Check if both extractions and comparisons are now empty
@@ -4551,8 +5618,11 @@ def show_experiment_detail(experiment_id):
 
 def show():
     """Main dashboard interface"""
-    # Initialize database tables
-    initialize_experiment_tables()
+    # Initialize database tables only when needed (lazy loading)
+    if 'tables_initialized' not in st.session_state:
+        with st.spinner("Initializing database tables..."):
+            result = initialize_experiment_tables()
+            st.session_state.tables_initialized = True
     
     # Show sidebar navigation
     show_sidebar_navigation()
@@ -4563,7 +5633,7 @@ def show():
     
     # Render content based on selected page
     if current_page == "Cases":
-        show_case_management()
+        show_case_management_v2()
         
     elif current_page == "Library Overview":
         show_experiment_overview()

@@ -11,3 +11,4 @@ statsmodels
 openpyxl
 psycopg2-binary
 sqlalchemy
+scipy
